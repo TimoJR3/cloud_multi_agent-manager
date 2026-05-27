@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 
 import httpx
@@ -8,6 +9,21 @@ import pytest
 
 
 pytestmark = pytest.mark.skipif(os.getenv("RUN_INTEGRATION") != "1", reason="integration tests require running docker compose")
+
+
+def rabbit_queue_messages(queue_name: str) -> int:
+    result = subprocess.run(
+        ["docker", "compose", "exec", "-T", "rabbitmq", "rabbitmqctl", "list_queues", "name", "messages"],
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == queue_name:
+            return int(parts[1])
+    raise AssertionError(f"queue not found: {queue_name}")
 
 
 def test_task_reaches_done_status() -> None:
@@ -28,6 +44,8 @@ def test_task_reaches_done_status() -> None:
             assert current.status_code == 200
             status = current.json()["status"]
             if status == "done":
+                assert rabbit_queue_messages("queue.dead") == 0
+                assert rabbit_queue_messages("queue.retry") == 0
                 return
             assert status != "failed", current.json()
             time.sleep(1)
