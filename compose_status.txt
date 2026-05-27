@@ -1,0 +1,15 @@
+NAME                        IMAGE                               COMMAND                  SERVICE             CREATED             STATUS                       PORTS
+cloudrm-api-service         ahmed_cloud_mas-api-service         "uvicorn services.ap…"   api-service         3 minutes ago       Up 2 minutes (healthy)       0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
+cloudrm-coordinator-agent   ahmed_cloud_mas-coordinator-agent   "uvicorn services.co…"   coordinator-agent   19 minutes ago      Up 19 minutes (healthy)      0.0.0.0:8015->8015/tcp, [::]:8015->8015/tcp
+cloudrm-executor-agent      ahmed_cloud_mas-executor-agent      "uvicorn services.ex…"   executor-agent      12 minutes ago      Up 11 minutes (healthy)      0.0.0.0:8016->8016/tcp, [::]:8016->8016/tcp
+cloudrm-forecast-agent      ahmed_cloud_mas-forecast-agent      "uvicorn services.fo…"   forecast-agent      30 minutes ago      Up 30 minutes (healthy)      0.0.0.0:8014->8014/tcp, [::]:8014->8014/tcp
+cloudrm-grafana             grafana/grafana:11.4.0              "/run.sh"                grafana             2 hours ago         Up 11 minutes (healthy)      0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp
+cloudrm-kafka               apache/kafka:3.8.0                  "/__cacert_entrypoin…"   kafka               2 hours ago         Up 2 hours (healthy)         0.0.0.0:9092->19092/tcp, [::]:9092->19092/tcp
+cloudrm-load-generator      ahmed_cloud_mas-load-generator      "uvicorn services.lo…"   load-generator      8 minutes ago       Up 8 minutes (healthy)       0.0.0.0:8017->8017/tcp, [::]:8017->8017/tcp
+cloudrm-postgres            postgres:16-alpine                  "docker-entrypoint.s…"   postgres            2 hours ago         Up 2 hours (healthy)         0.0.0.0:5433->5432/tcp, [::]:5433->5432/tcp
+cloudrm-prometheus          prom/prometheus:v2.55.1             "/bin/prometheus --c…"   prometheus          2 hours ago         Up 11 minutes (healthy)      0.0.0.0:9090->9090/tcp, [::]:9090->9090/tcp
+cloudrm-queue-agent         ahmed_cloud_mas-queue-agent         "uvicorn services.qu…"   queue-agent         About an hour ago   Up About an hour (healthy)   0.0.0.0:8011->8011/tcp, [::]:8011->8011/tcp
+cloudrm-redis               redis:7-alpine                      "docker-entrypoint.s…"   redis               2 hours ago         Up 2 hours (healthy)         0.0.0.0:6379->6379/tcp, [::]:6379->6379/tcp
+cloudrm-resource-agent      ahmed_cloud_mas-resource-agent      "uvicorn services.re…"   resource-agent      27 minutes ago      Up 27 minutes (healthy)      0.0.0.0:8012->8012/tcp, [::]:8012->8012/tcp
+cloudrm-sla-agent           ahmed_cloud_mas-sla-agent           "uvicorn services.sl…"   sla-agent           53 minutes ago      Up 53 minutes (healthy)      0.0.0.0:8013->8013/tcp, [::]:8013->8013/tcp
+rabbitmq                    rabbitmq:3-management               "docker-entrypoint.s…"   rabbitmq            2 hours ago         Up 2 hours (healthy)         0.0.0.0:5672->5672/tcp, [::]:5672->5672/tcp, 0.0.0.0:15672->15672/tcp, [::]:15672->15672/tcp

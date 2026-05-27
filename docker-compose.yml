@@ -1,0 +1,380 @@
+name: ${COMPOSE_PROJECT_NAME:-ahmed_cloud_mas}
+
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: cloudrm-kafka
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,HOST://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    ports:
+      - "9092:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: cloudrm-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash"]
+    command:
+      - -lc
+      - |
+        for topic in request.created request.classified need_placement node.proposal.fit sla.risk forecast.queue decision.dispatch decision.scale execution.done execution.failed telemetry.events; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+    networks:
+      - cloudrm
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: cloudrm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cloudrm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cloudrm}
+      POSTGRES_DB: ${POSTGRES_DB:-cloudrm}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - cloudrm
+
+  redis:
+    image: redis:7-alpine
+    container_name: cloudrm-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - redis-data:/data
+    networks:
+      - cloudrm
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-mas}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-mas_password}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - cloudrm
+
+  api-service:
+    build:
+      context: .
+      dockerfile: docker/api-service.Dockerfile
+    container_name: cloudrm-api-service
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: api-service
+      SERVICE_PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8000/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  queue-agent:
+    build:
+      context: .
+      dockerfile: docker/queue-agent.Dockerfile
+    container_name: cloudrm-queue-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: queue-agent
+      SERVICE_PORT: 8011
+    ports:
+      - "8011:8011"
+    depends_on:
+      api-service:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8011/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  resource-agent:
+    build:
+      context: .
+      dockerfile: docker/resource-agent.Dockerfile
+    container_name: cloudrm-resource-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: resource-agent
+      SERVICE_PORT: 8012
+    ports:
+      - "8012:8012"
+    depends_on:
+      queue-agent:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8012/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  sla-agent:
+    build:
+      context: .
+      dockerfile: docker/sla-agent.Dockerfile
+    container_name: cloudrm-sla-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: sla-agent
+      SERVICE_PORT: 8013
+    ports:
+      - "8013:8013"
+    depends_on:
+      queue-agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8013/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  forecast-agent:
+    build:
+      context: .
+      dockerfile: docker/forecast-agent.Dockerfile
+    container_name: cloudrm-forecast-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: forecast-agent
+      SERVICE_PORT: 8014
+    ports:
+      - "8014:8014"
+    depends_on:
+      queue-agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8014/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  coordinator-agent:
+    build:
+      context: .
+      dockerfile: docker/coordinator-agent.Dockerfile
+    container_name: cloudrm-coordinator-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: coordinator-agent
+      SERVICE_PORT: 8015
+    ports:
+      - "8015:8015"
+    depends_on:
+      resource-agent:
+        condition: service_healthy
+      sla-agent:
+        condition: service_healthy
+      forecast-agent:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8015/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  executor-agent:
+    build:
+      context: .
+      dockerfile: docker/executor-agent.Dockerfile
+    container_name: cloudrm-executor-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: executor-agent
+      SERVICE_PORT: 8016
+    ports:
+      - "8016:8016"
+    depends_on:
+      coordinator-agent:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8016/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  load-generator:
+    build:
+      context: .
+      dockerfile: docker/load-generator.Dockerfile
+    container_name: cloudrm-load-generator
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: load-generator
+      SERVICE_PORT: 8017
+      API_URL: http://api-service:8000
+    ports:
+      - "8017:8017"
+    depends_on:
+      api-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8017/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: cloudrm-prometheus
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      executor-agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: cloudrm-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+networks:
+  cloudrm:
+    driver: bridge
+
+volumes:
+  kafka-data:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:

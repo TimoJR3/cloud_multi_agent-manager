@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: CloudRM
+    orgId: 1
+    folder: CloudRM
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

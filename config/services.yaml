@@ -1,0 +1,75 @@
+system:
+  retry:
+    attempts: 30
+    delay_seconds: 2
+  metrics:
+    enabled: true
+  telemetry_topic: telemetry.events
+
+kafka:
+  bootstrap_servers: ${KAFKA_BOOTSTRAP_SERVERS}
+  topics:
+    request_created: request.created
+    request_classified: request.classified
+    need_placement: need_placement
+    node_proposal_fit: node.proposal.fit
+    sla_risk: sla.risk
+    forecast_queue: forecast.queue
+    decision_dispatch: decision.dispatch
+    decision_scale: decision.scale
+    execution_done: execution.done
+    execution_failed: execution.failed
+
+rabbitmq:
+  host: ${RABBITMQ_HOST}
+  port: ${RABBITMQ_PORT}
+  username: ${RABBITMQ_DEFAULT_USER}
+  password: ${RABBITMQ_DEFAULT_PASS}
+  exchange: ${RABBITMQ_EXCHANGE}
+  dlx: ${RABBITMQ_DLX}
+  retry_exchange: ${RABBITMQ_RETRY_EXCHANGE}
+  prefetch: ${RABBITMQ_PREFETCH}
+  retry_ttl_ms: 10000
+  default_ttl_seconds: 300
+
+postgres:
+  dsn: ${DATABASE_URL}
+
+redis:
+  url: ${REDIS_URL}
+  runtime_ttl_seconds: 3600
+
+api:
+  default_sla_seconds: 30
+
+agents:
+  queue:
+    aging_factor: 0.05
+    high_cpu_threshold: 4
+  resource:
+    nodes:
+      - id: node-a
+        cpu_total: 8
+        ram_total_mb: 16384
+        labels:
+          zone: zone-a
+          gpu: "false"
+      - id: node-b
+        cpu_total: 12
+        ram_total_mb: 32768
+        labels:
+          zone: zone-b
+          gpu: "false"
+      - id: node-gpu
+        cpu_total: 16
+        ram_total_mb: 65536
+        labels:
+          zone: zone-c
+          gpu: "true"
+  coordinator:
+    weights:
+      fit: 0.35
+      sla: 0.25
+      balance: 0.2
+      forecast: 0.1
+      cost: 0.1

@@ -1,0 +1,29 @@
+[✓] Docker Compose конфигурация валидна
+[✓] Все основные Docker Compose сервисы запущены
+[✓] Kafka broker: код=0
+[✓] RabbitMQ container health: код=0
+[✓] RabbitMQ AMQP: TCP localhost:5672 доступен
+[✓] RabbitMQ Management: TCP localhost:15672 доступен
+[✓] PostgreSQL: код=0
+[✓] Redis: код=0
+[✓] api-service /health: HTTP 200, статус=ok
+[✓] api-service /ready: HTTP 200, статус=ok
+[✓] queue-agent /health: HTTP 200, статус=ok
+[✓] queue-agent /ready: HTTP 200, статус=ok
+[✓] resource-agent /health: HTTP 200, статус=ok
+[✓] resource-agent /ready: HTTP 200, статус=ok
+[✓] sla-agent /health: HTTP 200, статус=ok
+[✓] sla-agent /ready: HTTP 200, статус=ok
+[✓] forecast-agent /health: HTTP 200, статус=ok
+[✓] forecast-agent /ready: HTTP 200, статус=ok
+[✓] coordinator-agent /health: HTTP 200, статус=ok
+[✓] coordinator-agent /ready: HTTP 200, статус=ok
+[✓] executor-agent /health: HTTP 200, статус=ok
+[✓] executor-agent /ready: HTTP 200, статус=ok
+[✓] load-generator /health: HTTP 200, статус=ok
+[✓] load-generator /ready: HTTP 200, статус=ok
+[✓] Поток событий: задача принята API, task_id=a1ee6a10-6e31-4f76-ad57-c7d6e94afd73
+[✓] Поток событий: задача дошла до execution.done
+[✓] Prometheus: HTTP 200
+[✓] Grafana: HTTP 200
+[✓] Итог: все обязательные runtime-проверки прошли
