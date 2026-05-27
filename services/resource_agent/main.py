@@ -20,7 +20,7 @@ from cloudrm.runtime import ServiceRuntime
 configure_logging()
 logger = logging.getLogger("resource-agent")
 
-runtime = ServiceRuntime("resource-agent", ["need_placement"])
+runtime = ServiceRuntime("resource-agent", ["need_placement", "node.unavailable"])
 worker_task: asyncio.Task[None] | None = None
 
 
@@ -84,6 +84,11 @@ async def worker() -> None:
         started = time.perf_counter()
         try:
             task = envelope.payload
+            if envelope.event_type == "node.unavailable":
+                await runtime.redis.hset(f"node:{task['node_id']}", mapping={"status": "failed"})
+                await runtime.consumer.commit()
+                runtime.last_error = None
+                continue
             keys = await runtime.redis.keys("node:*")
             proposals = 0
             for key in keys:

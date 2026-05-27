@@ -1,121 +1,71 @@
-# Финальный отчет о состоянии прототипа CloudRM
+# Финальный Отчет По Прототипу CloudRM
 
-Дата проверки: 2026-05-26  
-Рабочая директория: `/Users/timurgasanov/Desktop/Ахмед_курсач`
+Дата обновления: 2026-05-27  
+Рабочая директория: `C:\Users\Ahmed The Best\OneDrive\Desktop\ВКР\cloud_multi_agent-manager`
 
-## 1. Работающие компоненты
+## Что Теперь Работает
 
-[✓] Сгенерирована структура репозитория: `/services`, `/common`, `/config`, `/docker`, `/grafana`, `/prometheus`, `/scripts`, `/tests`, `/docs`  
-[✓] Реализована общая библиотека: конфигурация YAML, JSON-логирование, Kafka messaging, retry, PostgreSQL migrations, Redis cache, persistence helpers, Prometheus metrics  
-[✓] Реализован `api-service`: прием задач, статус задач, список узлов, эксперименты, симуляция отказа узла, `/health`, `/metrics`  
-[✓] Реализован `queue-agent`: классификация, динамический приоритет, очередь Redis, события `request.classified` и `need_placement`  
-[✓] Реализован `resource-agent`: состояние узлов, CPU/RAM/GPU fit, utility-предложения `node.proposal.fit`  
-[✓] Реализован `sla-agent`: оценка SLA-риска, priority boost, запись SLA-рисков  
-[✓] Реализован `forecast-agent`: moving-average прогноз и риск перегрузки  
-[✓] Реализован `coordinator-agent`: агрегация сигналов, utility-функция, `decision.dispatch`, `decision.scale`  
-[✓] Реализован `executor-agent`: Kubernetes emulator adapter, статусы задач, `execution.done`, `execution.failed`  
-[✓] Реализован `load-generator`: сценарии `normal`, `peak`, `overload`, `node_failure`  
-[✓] Созданы Dockerfile для каждого Python-сервиса  
-[✓] Создан `docker-compose.yml` с Kafka, PostgreSQL, Redis, сервисами, Prometheus и Grafana  
-[✓] Созданы Grafana datasource и dashboard provisioning  
-[✓] Созданы smoke-тесты и интеграционный тест полного потока  
-[✓] Локальные проверки прошли: `pytest -q` дал `2 passed, 1 skipped`; `compileall` прошел; YAML-конфигурации валидны  
+- RabbitMQ стал основным runtime broker агентного контура через `EVENT_BACKEND=rabbitmq`.
+- Kafka сохранена как optional audit/telemetry backend в режимах `kafka` и `dual`.
+- Реализованы RabbitMQ consumer, ack, retry queue, DLQ для expired/failed сообщений и routing mapping по агентам.
+- Queue-agent ведет классовые очереди Redis: `standard`, `cpu-heavy`, `memory-heavy`, `gpu`, `critical`, а также совместимый агрегат `queue:waiting`.
+- Добавлен periodic aging: dynamic priority растет по фактическому времени ожидания.
+- SLA-agent разделяет риск и фактическое нарушение: `sla.risk` больше не считается нарушением сам по себе.
+- Coordinator-agent ждет decision window, собирает proposals/SLA/forecast и сохраняет explanation: `reason`, `used_signals`, `utility_breakdown`.
+- Добавлен scale-agent: читает `decision.scale`, создает виртуальные `node-auto-N`, соблюдает cooldown, блокирует небезопасный scale-in.
+- `/nodes/{node_id}/failure` переводит узел в `failed`, публикует `node.unavailable` и сохраняет событие.
+- Executor-agent не размещает задачи на failed node и фиксирует `execution.failed` с `reason=node_failure`.
+- Добавлены метрики очередей, SLA risks/violations, wait latency, decision latency, consumed/dead-letter messages, scaling actions.
+- Добавлен `scripts/run_experiments.py` для сценариев `normal`, `overload`, `gpu_shortage`, `node_failure` и режимов `baseline`/`mas`.
 
-## 2. Сломанные компоненты
+## Проверки
 
-[!] Контейнерная runtime-валидация не выполнена в текущем окружении: команда `docker` отсутствует.  
-[!] Из-за отсутствия Docker не подтверждены факты: контейнеры healthy, Kafka принимает сообщения в реальном контейнере, Prometheus реально скрейпит сервисы, Grafana реально открывает dashboard.  
-[!] Интеграционный тест `tests/integration/test_event_flow.py` автоматически пропущен без `RUN_INTEGRATION=1` и запущенного Compose-стека.
+Локально выполнено:
 
-## 3. Отсутствующие необязательные функции
+```bash
+py -3.11 -m pip install -r requirements.txt
+py -3.11 -m pytest -q
+```
 
-[ ] Нет реального Kubernetes API и real autoscaling  
-[ ] Нет полноценной ML-модели прогноза, только moving-average  
-[ ] Нет UI, кроме Grafana  
-[ ] Нет распределенной трассировки OpenTelemetry  
-[ ] Нет авторизации API  
+Результат:
 
-## 4. Требуемая ручная настройка
+```text
+23 passed, 3 skipped
+```
 
-[!] Установить и запустить Docker Desktop или совместимый Docker CLI.  
-[!] Если `.env` отсутствует, выполнить `make init`. Сейчас `.env` уже создан из `.env.example`.  
-[!] После запуска контейнеров выполнить runtime-валидацию вручную.
+Пропущены integration tests, потому что `RUN_INTEGRATION=1` не установлен и docker compose runtime не был поднят.
 
-## 5. Команды запуска
+Пробная статическая проверка compose:
+
+```bash
+docker compose config --quiet
+```
+
+Не выполнена до конца из-за отсутствующего `.env`:
+
+```text
+env file ...\.env not found
+```
+
+Нужно выполнить `make init` или скопировать `.env.example` в `.env`, затем повторить compose/runtime проверки.
+
+## Команды Полной Runtime-Проверки
 
 ```bash
 make init
 docker compose up --build -d
 docker compose ps
-```
-
-Логи:
-
-```bash
-docker compose logs -f --tail=200
-```
-
-Остановка:
-
-```bash
-docker compose down
-```
-
-## 6. Команды тестирования
-
-```bash
-pytest -q
-python scripts/validate_env.py
+python scripts/validate_brokers.py
 python scripts/validate_runtime.py
-RUN_INTEGRATION=1 pytest -q tests/integration
+RUN_INTEGRATION=1 py -3.11 -m pytest -q tests/integration
+py -3.11 scripts/run_experiments.py --duration-seconds 30 --seed 42
 ```
 
-## 7. Примеры API-запросов
+## Оставшиеся Ограничения
 
-Создать задачу:
-
-```bash
-curl -X POST http://localhost:8000/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"task_type":"batch","cpu_required":2,"ram_required_mb":1024,"duration_seconds":3,"priority":4,"sla_deadline_seconds":20}'
-```
-
-Получить статус:
-
-```bash
-curl http://localhost:8000/tasks/<task_id>
-```
-
-Запустить перегрузку:
-
-```bash
-curl -X POST http://localhost:8000/experiments/start \
-  -H 'Content-Type: application/json' \
-  -d '{"scenario":"overload"}'
-```
-
-Симулировать отказ узла:
-
-```bash
-curl -X POST http://localhost:8000/nodes/node-a/failure
-```
-
-Проверить метрики:
-
-```bash
-curl http://localhost:8000/metrics
-curl http://localhost:8011/metrics
-```
-
-## 8. Известные ограничения
-
-Прототип исследовательский. Он моделирует поведение очередей, агентов и ресурсов, но не управляет реальным облаком. Эмулятор Kubernetes ограничен переходами состояния и искусственной длительностью исполнения. Utility-функция и SLA-риск намеренно простые, чтобы поведение было объяснимым в магистерской работе.
-
-## 9. Следующие улучшения
-
-[ ] Запустить Docker Compose в окружении с Docker и исправить возможные runtime-ошибки  
-[ ] Добавить больше Grafana-панелей: SLA, latency, node utilization, Kafka throughput  
-[ ] Добавить DLQ-topic для ошибочных сообщений  
-[ ] Добавить contract-тесты схем событий  
-[ ] Добавить сценарии экспериментов с повторяемыми seed-настройками  
-[ ] Добавить экспорт экспериментальных результатов в CSV  
+- Runtime docker-compose не проверен в текущей среде, потому что `.env` отсутствует; контейнеры не запускались.
+- Scale-agent является emulator adapter: он добавляет Redis-узлы, но не вызывает реальный Kubernetes/cloud API.
+- Baseline mode реализован как упрощение текущего контура: coordinator игнорирует SLA/forecast в utility, queue-agent игнорирует SLA boost, scale-agent отключает cooldown. Это не отдельный standalone scheduler.
+- Forecast остается moving-average.
+- Grafana dashboard не был глубоко переработан; Prometheus scrape config расширен для scale-agent.
+- Авторизация API не добавлена.

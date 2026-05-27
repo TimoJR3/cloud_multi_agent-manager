@@ -33,6 +33,7 @@ async def test_runtime_publish_sends_to_kafka_and_rabbitmq(monkeypatch) -> None:
     service.db = object()
     service.bus = FakeKafkaBus()
     service.rabbit = FakeRabbitPublisher()
+    service.event_backend = "dual"
 
     envelope = EventEnvelope(event_type="request.created", source="test", payload={"task_id": "t1"})
     await service.publish("request_created", envelope)
@@ -40,3 +41,23 @@ async def test_runtime_publish_sends_to_kafka_and_rabbitmq(monkeypatch) -> None:
     assert service.bus.messages[0][0] == "request.created"
     assert service.rabbit.messages[0][0] == "request.created"
     assert service.bus.messages[0][1].correlation_id == service.rabbit.messages[0][1].correlation_id
+
+
+@pytest.mark.asyncio
+async def test_runtime_publish_defaults_to_rabbitmq(monkeypatch) -> None:
+    async def fake_record_event(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(runtime_module, "record_event", fake_record_event)
+    service = ServiceRuntime("test-service")
+    service.config = {"kafka": {"topics": {"request_created": "request.created"}}}
+    service.db = object()
+    service.bus = FakeKafkaBus()
+    service.rabbit = FakeRabbitPublisher()
+    service.event_backend = "rabbitmq"
+
+    envelope = EventEnvelope(event_type="request.created", source="test", payload={"task_id": "t1"})
+    await service.publish("request_created", envelope)
+
+    assert service.bus.messages == []
+    assert service.rabbit.messages[0][0] == "request.created"

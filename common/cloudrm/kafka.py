@@ -7,6 +7,7 @@ from typing import Any
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from cloudrm.messages import EventEnvelope
+from cloudrm.metrics import CONSUMED_MESSAGES
 
 
 class EventBus:
@@ -57,6 +58,7 @@ class EventConsumer:
             if envelope.is_expired():
                 await self.consumer.commit()
                 continue
+            CONSUMED_MESSAGES.labels("kafka", message.topic, envelope.event_type, envelope.source).inc()
             yield message, envelope
 
     async def commit(self) -> None:

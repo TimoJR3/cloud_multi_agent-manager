@@ -1,4 +1,5 @@
 system:
+  event_backend: ${EVENT_BACKEND}
   retry:
     attempts: 30
     delay_seconds: 2
@@ -14,11 +15,17 @@ kafka:
     need_placement: need_placement
     node_proposal_fit: node.proposal.fit
     sla_risk: sla.risk
+    sla_boost: sla.boost
     forecast_queue: forecast.queue
     decision_dispatch: decision.dispatch
     decision_scale: decision.scale
     execution_done: execution.done
     execution_failed: execution.failed
+    node_unavailable: node.unavailable
+    scaling_started: scaling.started
+    scaling_done: scaling.done
+    scaling_blocked: scaling.blocked
+    scaling_failed: scaling.failed
 
 rabbitmq:
   host: ${RABBITMQ_HOST}
@@ -45,6 +52,7 @@ api:
 agents:
   queue:
     aging_factor: 0.05
+    aging_interval_seconds: 1
     high_cpu_threshold: 4
   resource:
     nodes:
@@ -67,9 +75,18 @@ agents:
           zone: zone-c
           gpu: "true"
   coordinator:
+    decision_window_ms: 500
+    proposal_ttl_seconds: 30
     weights:
       fit: 0.35
       sla: 0.25
       balance: 0.2
       forecast: 0.1
       cost: 0.1
+  scale:
+    cooldown_seconds: 30
+    emulator_node:
+      cpu_total: 8
+      ram_total_mb: 16384
+      gpu: "false"
+      zone: auto

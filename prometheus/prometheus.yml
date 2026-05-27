@@ -18,4 +18,5 @@ scrape_configs:
           - forecast-agent:8014
           - coordinator-agent:8015
           - executor-agent:8016
+          - scale-agent:8018
           - load-generator:8017

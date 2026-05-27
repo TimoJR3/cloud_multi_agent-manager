@@ -12,6 +12,7 @@ def test_required_files_exist() -> None:
         "docker/forecast-agent.Dockerfile",
         "docker/coordinator-agent.Dockerfile",
         "docker/executor-agent.Dockerfile",
+        "docker/scale-agent.Dockerfile",
         "docker/load-generator.Dockerfile",
         "common/cloudrm/kafka.py",
         "common/cloudrm/rabbit.py",
@@ -22,6 +23,7 @@ def test_required_files_exist() -> None:
         "services/forecast_agent/main.py",
         "services/coordinator_agent/main.py",
         "services/executor_agent/main.py",
+        "services/scale_agent/main.py",
         "services/load_generator/main.py",
         "config/services.yaml",
         "prometheus/prometheus.yml",
@@ -41,6 +43,7 @@ def test_service_modules_are_importable() -> None:
     import services.queue_agent.main  # noqa: F401
     import services.resource_agent.main  # noqa: F401
     import services.sla_agent.main  # noqa: F401
+    import services.scale_agent.main  # noqa: F401
 
 
 def test_rabbitmq_env_example_exists() -> None:
@@ -56,6 +59,7 @@ def test_rabbitmq_env_example_exists() -> None:
         "RABBITMQ_DLX=mas.dlx",
         "RABBITMQ_RETRY_EXCHANGE=mas.retry",
         "RABBITMQ_PREFETCH=10",
+        "EVENT_BACKEND=rabbitmq",
     ]
     for item in required:
         assert item in content

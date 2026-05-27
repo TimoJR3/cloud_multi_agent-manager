@@ -43,7 +43,7 @@ services:
     command:
       - -lc
       - |
-        for topic in request.created request.classified need_placement node.proposal.fit sla.risk forecast.queue decision.dispatch decision.scale execution.done execution.failed telemetry.events; do
+        for topic in request.created request.classified need_placement node.proposal.fit sla.risk sla.boost forecast.queue decision.dispatch decision.scale execution.done execution.failed node.unavailable scaling.started scaling.done scaling.blocked scaling.failed telemetry.events; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1
         done
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
@@ -290,6 +290,32 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8016/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cloudrm
+
+  scale-agent:
+    build:
+      context: .
+      dockerfile: docker/scale-agent.Dockerfile
+    container_name: cloudrm-scale-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: scale-agent
+      SERVICE_PORT: 8018
+    ports:
+      - "8018:8018"
+    depends_on:
+      coordinator-agent:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/healthcheck_http.py http://localhost:8018/ready"]
       interval: 10s
       timeout: 5s
       retries: 20

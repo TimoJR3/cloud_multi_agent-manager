@@ -1,172 +1,118 @@
-# CloudRM: исследовательский прототип мультиагентного управления ресурсами ЦОД
+# CloudRM: мультиагентное управление очередями и ресурсами облачного ЦОД
 
-Прототип моделирует событийно-ориентированную систему управления очередями задач и вычислительными ресурсами облачного дата-центра. Kafka используется как потоковая шина событий и телеметрии, RabbitMQ используется как оперативная шина межагентных команд и маршрутизации. Состояние хранится в PostgreSQL и Redis, метрики собирает Prometheus, панели автоматически загружает Grafana.
+Исследовательский прототип для ВКР «Разработка мультиагентной системы для управления очередями и ресурсами в облачных ЦОД». Система моделирует событийный контур: API принимает заявки, queue-agent классифицирует их и ведет очереди, resource-agent формирует предложения размещения, SLA-agent оценивает риск и фактические нарушения, forecast-agent дает краткосрочный прогноз, coordinator-agent принимает объяснимое решение, executor-agent эмулирует исполнение, scale-agent эмулирует scale-out/scale-in.
 
-## Быстрый запуск
+RabbitMQ теперь является основным runtime broker для агентного контура. Kafka сохранена как опциональная audit/telemetry шина через `EVENT_BACKEND=kafka|dual`.
+
+## Быстрый Запуск
 
 ```bash
 make init
-python scripts/check_compose.py
 docker compose up --build -d
 docker compose ps
 ```
 
-Проверка:
+Проверки после запуска:
 
 ```bash
-python scripts/validate_infra.py
 curl http://localhost:8000/health
-```
-
-Полная runtime-проверка после запуска всех контейнеров:
-
-```bash
+curl http://localhost:8000/ready
 python scripts/validate_brokers.py
 python scripts/validate_runtime.py
 RUN_INTEGRATION=1 pytest -q tests/integration
 ```
 
-## Исправление ошибки `project name must not be empty`
-
-Если команда:
+Локальные unit/smoke тесты:
 
 ```bash
-docker compose up --build -d
+py -3.11 -m pytest -q
 ```
 
-падает с ошибкой `project name must not be empty`, значит Docker Compose получил пустое имя проекта. Обычно причина в пустой переменной `COMPOSE_PROJECT_NAME` или `PROJECT_NAME` в окружении или `.env`.
+## Конфигурация Брокера
 
-В проекте задан безопасный fallback:
+`EVENT_BACKEND` задает режим событий:
 
-```yaml
-name: ${COMPOSE_PROJECT_NAME:-ahmed_cloud_mas}
-```
+- `rabbitmq` - основной режим по умолчанию, агенты потребляют RabbitMQ queues.
+- `kafka` - совместимый Kafka-only режим.
+- `dual` - publish в RabbitMQ и Kafka, consumption через RabbitMQ для агентов.
 
-В `.env` должно быть:
+RabbitMQ topology:
 
-```bash
-COMPOSE_PROJECT_NAME=ahmed_cloud_mas
-```
-
-Команды диагностики и исправления:
-
-```bash
-make init
-python scripts/check_compose.py
-docker compose config
-docker compose up --build -d
-python scripts/validate_runtime.py
-```
-
-Если `python scripts/check_compose.py` сообщает, что Docker CLI не найден, нужно запустить Docker Desktop или установить совместимый Docker CLI.
-
-## Архитектура
-
-```mermaid
-flowchart LR
-    API["API / Load Generator"] --> Dual["dual publish"]
-    Dual --> Kafka[(Kafka)]
-    Dual --> Rabbit[(RabbitMQ)]
-    Kafka --> Stream["Telemetry / Event Stream"]
-    Rabbit --> CommandBus["Agent Command Bus"]
-    Stream --> Agents["Agents / Coordinator / Executor"]
-    CommandBus --> Agents
-    Agents --> Storage["PostgreSQL / Redis / Metrics"]
-    Prometheus --> Storage
-    Grafana --> Prometheus
-```
-
-## Kafka и RabbitMQ
-
-Kafka сохранен как долговременная потоковая шина событий, телеметрии и аудита. Все исходные топики остаются активными: `request.created`, `request.classified`, `need_placement`, `node.proposal.fit`, `sla.risk`, `forecast.queue`, `decision.dispatch`, `decision.scale`, `execution.done`, `execution.failed`.
-
-RabbitMQ добавлен как оперативная шина межагентного обмена. Он использует topic exchange `mas.events`, DLX `mas.dlx`, retry exchange `mas.retry`, очереди `queue.requests`, `queue.resources`, `queue.sla`, `queue.forecast`, `queue.coordinator`, `queue.executor`, `queue.dead` и `queue.retry`.
-
-В текущем инкременте используется гибридный режим `dual-publish`: важное доменное событие публикуется в Kafka и дополнительно в RabbitMQ с тем же `correlation_id`. `event_id` остается общим для доменного события, а `message_id` генерируется отдельно для каждой брокерной публикации. Это сохраняет текущую Kafka-реализацию и добавляет RabbitMQ-модель из ВКР без рискованного переключения потребителей.
-
-Ссылки после запуска:
-
-- API: http://localhost:8000
-- RabbitMQ Management UI: http://localhost:15672
-- RabbitMQ логин/пароль: значения `RABBITMQ_DEFAULT_USER` и `RABBITMQ_DEFAULT_PASS` из `.env`
-- Prometheus: http://localhost:9090
-- Grafana: http://localhost:3000
-
-## Текущий статус
-
-[✓] Добавлены Kafka, RabbitMQ, PostgreSQL, Redis, API, Prometheus, Grafana  
-[✓] API умеет принимать задачи и публиковать `request.created` в Kafka и RabbitMQ  
-[✓] Реализованы `queue-agent`, `resource-agent`, `sla-agent`, `forecast-agent`, `coordinator-agent`, `executor-agent`, `load-generator`  
-[✓] Добавлены healthcheck endpoints и Prometheus metrics endpoints для всех Python-сервисов  
-[✓] Добавлены smoke-тесты, интеграционный тест полного потока и runtime-валидатор  
-[ ] Полная контейнерная проверка требует ручного запуска `docker compose up --build -d`  
+- exchange: `mas.events`
+- retry exchange: `mas.retry`
+- DLX: `mas.dlx`
+- queues: `queue.requests`, `queue.resources`, `queue.sla`, `queue.forecast`, `queue.coordinator`, `queue.executor`, `queue.scale`, `queue.dead`, `queue.retry`
 
 ## Сервисы
 
-| Сервис | Порт | Назначение |
+| Сервис | Порт | Роль |
 | --- | ---: | --- |
-| `api-service` | 8000 | Прием задач, статус задач, эксперименты, отказ узла |
-| `queue-agent` | 8011 | Классификация задач, динамический приоритет, очередь |
-| `resource-agent` | 8012 | Проверка ресурсов узлов и предложения размещения |
-| `sla-agent` | 8013 | Оценка SLA-риска и повышение приоритета |
-| `forecast-agent` | 8014 | Скользящий прогноз очереди |
-| `coordinator-agent` | 8015 | Выбор узла по utility-функции и fallback scale-out |
-| `executor-agent` | 8016 | Эмуляция Kubernetes-исполнения |
-| `load-generator` | 8017 | Сценарии нагрузки |
-| `rabbitmq` | 5672 / 15672 | Оперативная шина команд и Management UI |
-| `prometheus` | 9090 | Сбор метрик |
-| `grafana` | 3000 | Панели мониторинга |
+| `api-service` | 8000 | прием задач, статусы, эксперименты, отказ узла |
+| `queue-agent` | 8011 | классовые очереди Redis, aging, SLA boost |
+| `resource-agent` | 8012 | CPU/RAM/GPU scoring и `node.proposal.fit` |
+| `sla-agent` | 8013 | `sla.risk`, `sla.boost`, фактические `sla_violations` |
+| `forecast-agent` | 8014 | moving-average прогноз очереди |
+| `coordinator-agent` | 8015 | decision window, utility, fallback dispatch/scale |
+| `executor-agent` | 8016 | emulator execution, node failure handling |
+| `load-generator` | 8017 | генератор нагрузки |
+| `scale-agent` | 8018 | emulator autoscaling по `decision.scale` |
+| `prometheus` | 9090 | метрики |
+| `grafana` | 3000 | dashboard |
 
-## Kafka topics
+## Основные Сценарии
 
-`request.created`, `request.classified`, `need_placement`, `node.proposal.fit`, `sla.risk`, `forecast.queue`, `decision.dispatch`, `decision.scale`, `execution.done`, `execution.failed`.
-
-## Пример API
+Создать задачу:
 
 ```bash
 curl -X POST http://localhost:8000/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"task_type":"batch","cpu_required":2,"ram_required_mb":1024,"duration_seconds":5,"priority":3,"sla_deadline_seconds":30}'
+  -H "Content-Type: application/json" \
+  -d '{"task_type":"batch","cpu_required":2,"ram_required_mb":1024,"duration_seconds":3,"priority":4,"sla_deadline_seconds":20}'
 ```
+
+GPU-задача:
 
 ```bash
-curl http://localhost:8000/nodes
+curl -X POST http://localhost:8000/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"task_type":"gpu","cpu_required":2,"ram_required_mb":4096,"duration_seconds":3,"priority":5,"sla_deadline_seconds":20,"requires_gpu":true}'
 ```
 
-Запуск эксперимента:
-
-```bash
-curl -X POST http://localhost:8000/experiments/start \
-  -H 'Content-Type: application/json' \
-  -d '{"scenario":"overload"}'
-```
-
-Остановка эксперимента:
-
-```bash
-curl -X POST http://localhost:8000/experiments/stop
-```
-
-Симуляция отказа узла:
+Отказ узла:
 
 ```bash
 curl -X POST http://localhost:8000/nodes/node-a/failure
 ```
 
-## Проверки
+## Эксперименты
+
+Скрипт запускает воспроизводимые сценарии `normal`, `overload`, `gpu_shortage`, `node_failure` в режимах `baseline` и `mas`, затем пишет:
+
+- `artifacts/experiments/results.csv`
+- `artifacts/experiments/summary.md`
+
+Команда:
 
 ```bash
-pytest -q
-python scripts/validate_env.py
-python scripts/check_compose.py
-docker compose config
-docker compose up --build -d
-docker compose ps
-python scripts/validate_brokers.py
-python scripts/validate_runtime.py
-docker compose logs -f --tail=200
+py -3.11 scripts/run_experiments.py --duration-seconds 30 --seed 42
 ```
+
+Метрики summary считаются по PostgreSQL при доступности `DATABASE_URL`; если БД недоступна с хоста, скрипт использует только факты, собранные через API, и не подставляет синтетические значения.
+
+## Метрики
+
+Добавлены метрики:
+
+- `cloudrm_request_wait_seconds`
+- `cloudrm_decision_latency_seconds`
+- `cloudrm_execution_failures_total`
+- `cloudrm_consumed_messages_total`
+- `cloudrm_dead_letter_messages_total`
+- `cloudrm_sla_risks_total`
+- `cloudrm_sla_violations_total`
+- `cloudrm_scaling_actions_total`
+- `cloudrm_scaling_cooldown_blocks_total`
+- `cloudrm_queue_length{class=...}`
 
 ## Ограничения
 
-Прототип не является реальным Kubernetes-оператором и не выполняет фактическое облачное autoscaling-действие. `executor-agent` использует эмулятор исполнения через `asyncio.sleep`, а `coordinator-agent` публикует рекомендацию `decision.scale` как исследовательский сигнал.
+Это исследовательский emulator, а не Kubernetes operator. `scale-agent` добавляет виртуальные Redis-узлы `node-auto-N`; future Kubernetes adapter можно подключить за тем же контуром `decision.scale -> scaling.*`. Forecast остается moving-average без тяжелой ML-модели. Авторизация API намеренно не добавлена.

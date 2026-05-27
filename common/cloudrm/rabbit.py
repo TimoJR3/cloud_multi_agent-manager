@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from aio_pika import DeliveryMode, ExchangeType, IncomingMessage, Message, connect_robust
@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from cloudrm.config import get_nested
 from cloudrm.messages import EventEnvelope
+from cloudrm.metrics import CONSUMED_MESSAGES, DEAD_LETTER_MESSAGES
 
 logger = logging.getLogger("cloudrm.rabbitmq")
 
@@ -29,12 +30,13 @@ class RabbitMQSettings(BaseModel):
     default_ttl_seconds: int = 300
     queues: dict[str, list[str]] = Field(
         default_factory=lambda: {
-            "queue.requests": ["request.*", "execution.*"],
-            "queue.resources": ["need_placement", "node.metrics.*", "node.failure.*"],
+            "queue.requests": ["request.created", "sla.boost", "sla.risk"],
+            "queue.resources": ["need_placement", "node.metrics.*", "node.unavailable"],
             "queue.sla": ["request.classified", "decision.*", "execution.*"],
             "queue.forecast": ["request.*", "queue.*", "execution.*"],
-            "queue.coordinator": ["request.classified", "node.proposal.*", "sla.*", "forecast.*"],
-            "queue.executor": ["decision.*"],
+            "queue.coordinator": ["request.classified", "node.proposal.*", "sla.*", "forecast.*", "node.unavailable"],
+            "queue.executor": ["decision.dispatch", "node.unavailable"],
+            "queue.scale": ["decision.scale"],
         }
     )
 
@@ -57,6 +59,18 @@ class RabbitMQSettings(BaseModel):
             retry_ttl_ms=int(raw.get("retry_ttl_ms", 10000)),
             default_ttl_seconds=int(raw.get("default_ttl_seconds", 300)),
         )
+
+    def queue_for_service(self, service_name: str) -> str | None:
+        mapping = {
+            "queue-agent": "queue.requests",
+            "resource-agent": "queue.resources",
+            "sla-agent": "queue.sla",
+            "forecast-agent": "queue.forecast",
+            "coordinator-agent": "queue.coordinator",
+            "executor-agent": "queue.executor",
+            "scale-agent": "queue.scale",
+        }
+        return mapping.get(service_name)
 
 
 async def connect_with_retry(settings: RabbitMQSettings, attempts: int, delay_seconds: float) -> AbstractRobustConnection:
@@ -163,12 +177,17 @@ class RabbitConsumer:
         self.connection: AbstractRobustConnection | None = None
         self.channel: AbstractChannel | None = None
         self.queue: AbstractQueue | None = None
+        self.events_exchange: AbstractExchange | None = None
+        self.retry_exchange: AbstractExchange | None = None
+        self._current_message: IncomingMessage | None = None
 
     async def start(self, attempts: int = 30, delay_seconds: float = 2.0) -> None:
         self.connection = await connect_with_retry(self.settings, attempts, delay_seconds)
         self.channel = await self.connection.channel()
         await self.channel.set_qos(prefetch_count=self.settings.prefetch)
         topology = await declare_topology(self.channel, self.settings)
+        self.events_exchange = topology[self.settings.exchange]  # type: ignore[assignment]
+        self.retry_exchange = topology[self.settings.retry_exchange]  # type: ignore[assignment]
         queue = topology.get(self.queue_name)
         if queue is None:
             raise RuntimeError(f"RabbitMQ очередь {self.queue_name} не объявлена")
@@ -192,9 +211,60 @@ class RabbitConsumer:
 
         await self.queue.consume(wrapped)
 
+    async def events(self) -> AsyncIterator[tuple[IncomingMessage, EventEnvelope]]:
+        if self.queue is None:
+            raise RuntimeError("RabbitMQ consumer is not started")
+        async with self.queue.iterator() as iterator:
+            async for message in iterator:
+                self._current_message = message
+                try:
+                    payload = json.loads(message.body.decode("utf-8"))
+                    envelope = EventEnvelope.model_validate(payload)
+                    if envelope.is_expired():
+                        DEAD_LETTER_MESSAGES.labels(self.queue_name, "expired").inc()
+                        await message.reject(requeue=False)
+                        continue
+                    CONSUMED_MESSAGES.labels("rabbitmq", self.queue_name, envelope.event_type, envelope.source).inc()
+                    yield message, envelope
+                finally:
+                    if not message.processed:
+                        await self.retry_or_dead_letter(message, reason="processing_failed")
+                    self._current_message = None
+
+    async def commit(self) -> None:
+        if self._current_message is not None and not self._current_message.processed:
+            await self._current_message.ack()
+
+    async def retry_or_dead_letter(self, message: IncomingMessage, *, reason: str) -> None:
+        if self.retry_exchange is None:
+            await message.reject(requeue=False)
+            DEAD_LETTER_MESSAGES.labels(self.queue_name, reason).inc()
+            return
+        retry_count = int((message.headers or {}).get("x-retry-count", 0))
+        max_retries = int((message.headers or {}).get("x-max-retries", 3))
+        if retry_count >= max_retries:
+            await message.reject(requeue=False)
+            DEAD_LETTER_MESSAGES.labels(self.queue_name, "max_retries").inc()
+            return
+        retry_headers = dict(message.headers or {})
+        retry_headers["x-retry-count"] = retry_count + 1
+        retry_message = Message(
+            message.body,
+            content_type=message.content_type,
+            delivery_mode=DeliveryMode.PERSISTENT,
+            message_id=message.message_id,
+            correlation_id=message.correlation_id,
+            headers=retry_headers,
+        )
+        await self.retry_exchange.publish(retry_message, routing_key=message.routing_key or "#")
+        await message.ack()
+
     async def close(self) -> None:
         if self.connection is not None:
             await self.connection.close()
+
+    async def stop(self) -> None:
+        await self.close()
 
 
 async def ping_rabbitmq(settings: RabbitMQSettings) -> bool:
