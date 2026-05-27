@@ -34,6 +34,31 @@ def test_task_reaches_done_status() -> None:
     pytest.fail("task did not reach done status in 60 seconds")
 
 
+def test_high_sla_risk_with_available_node_reaches_done() -> None:
+    payload = {
+        "task_type": "pytest-high-sla-risk",
+        "cpu_required": 1,
+        "ram_required_mb": 512,
+        "duration_seconds": 0.5,
+        "priority": 5,
+        "sla_deadline_seconds": 1,
+    }
+    with httpx.Client(base_url="http://localhost:8000", timeout=5) as client:
+        created = client.post("/tasks", json=payload)
+        assert created.status_code == 202
+        task_id = created.json()["task_id"]
+        for _ in range(60):
+            current = client.get(f"/tasks/{task_id}")
+            assert current.status_code == 200
+            status = current.json()["status"]
+            if status == "done":
+                return
+            assert status != "failed", current.json()
+            assert not (_ > 10 and status == "classified"), current.json()
+            time.sleep(1)
+    pytest.fail("high SLA risk task did not reach done status in 60 seconds")
+
+
 def test_gpu_shortage_triggers_scale_decision() -> None:
     payload = {
         "task_type": "pytest-scale",

@@ -30,7 +30,7 @@ class RabbitMQSettings(BaseModel):
     default_ttl_seconds: int = 300
     queues: dict[str, list[str]] = Field(
         default_factory=lambda: {
-            "queue.requests": ["request.created", "sla.boost", "sla.risk"],
+            "queue.requests": ["request.created", "sla.boost", "sla.risk", "scaling.done"],
             "queue.resources": ["need_placement", "node.metrics.*", "node.unavailable"],
             "queue.sla": ["request.classified", "decision.*", "execution.*"],
             "queue.forecast": ["request.*", "queue.*", "execution.*"],

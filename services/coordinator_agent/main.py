@@ -123,10 +123,37 @@ def build_explanation(
     }
 
 
-async def publish_scale(task: dict[str, Any], correlation_id: str, reason: str, explanation: dict[str, Any], utility_value: float = 0.0) -> None:
+def sla_risk_value(sla: dict[str, Any] | None) -> float:
+    return float((sla or {}).get("sla_risk", (sla or {}).get("risk", 0.0)))
+
+
+def should_scale_for_sla(sla: dict[str, Any] | None) -> bool:
+    if not sla:
+        return False
+    severity = str(sla.get("sla_severity", sla.get("severity", "low")))
+    recommendation = str(sla.get("recommendation", ""))
+    return severity in {"high", "critical"} or recommendation == "scale"
+
+
+async def publish_scale(
+    task: dict[str, Any],
+    correlation_id: str,
+    reason: str,
+    explanation: dict[str, Any],
+    utility_value: float = 0.0,
+    *,
+    advisory: bool = False,
+    requeue_after_scale: bool = False,
+) -> None:
     assert runtime.db is not None
     task_id = task["task_id"]
-    payload = {**task, **explanation, "recommended_nodes": 1}
+    payload = {
+        **task,
+        **explanation,
+        "recommended_nodes": 1,
+        "advisory": advisory,
+        "requeue_after_scale": requeue_after_scale,
+    }
     await runtime.publish(
         "decision_scale",
         EventEnvelope(event_type="decision.scale", correlation_id=correlation_id, source="coordinator-agent", payload=payload),
@@ -140,8 +167,19 @@ async def publish_scale(task: dict[str, Any], correlation_id: str, reason: str, 
         decision_type="scale",
         payload=payload,
     )
-    await runtime.redis.set(f"decision:made:{task_id}", "scale", ex=3600)  # type: ignore[union-attr]
-    logger.info("Scale decision emitted", extra={"cloudrm_task_id": task_id, "cloudrm_reason": reason})
+    if not advisory and not requeue_after_scale:
+        await runtime.redis.set(f"decision:made:{task_id}", "scale", ex=3600)  # type: ignore[union-attr]
+    logger.info(
+        "Scale decision emitted",
+        extra={
+            "cloudrm_task_id": task_id,
+            "cloudrm_selected_node": None,
+            "cloudrm_utility": utility_value,
+            "cloudrm_decision_type": "scale_advisory" if advisory else "scale",
+            "cloudrm_reason": reason,
+            "cloudrm_sla_risk": payload.get("sla_risk", payload.get("risk")),
+        },
+    )
 
 
 async def decide(task_id: str, correlation_id: str) -> None:
@@ -162,16 +200,11 @@ async def decide(task_id: str, correlation_id: str) -> None:
     proposals = await load_proposals(task_id)
     if not proposals:
         proposals = await degrade_proposals(task)
-    safe_proposals = [proposal for proposal in proposals if proposal.get("node_id") and not proposal.get("unsafe")]
+    safe_proposals = [proposal for proposal in proposals if proposal.get("node_id") and not proposal.get("resource_unsafe", False)]
 
-    if sla and sla.get("unsafe"):
-        explanation = build_explanation("scale", task, None, sla, forecast, proposals, "sla_policy_blocks_dispatch")
-        await publish_scale(task, correlation_id, "sla_policy_blocks_dispatch", explanation)
-        DECISION_LATENCY_SECONDS.observe(time.time() - started)
-        return
     if not safe_proposals:
         explanation = build_explanation("scale", task, None, sla, forecast, proposals, "no_safe_nodes_available")
-        await publish_scale(task, correlation_id, "no_safe_nodes_available", explanation)
+        await publish_scale(task, correlation_id, "no_safe_nodes_available", explanation, requeue_after_scale=True)
         DECISION_LATENCY_SECONDS.observe(time.time() - started)
         return
 
@@ -182,6 +215,8 @@ async def decide(task_id: str, correlation_id: str) -> None:
     selected = ranked[0]
     selected_utility = utility(selected, sla, forecast)
     reason = "best_utility"
+    if should_scale_for_sla(sla):
+        reason = "high_sla_risk_dispatch_with_advisory_scale"
     if selected.get("degraded"):
         reason = "degraded_policy_no_agent_proposals"
     explanation = build_explanation("dispatch", task, selected, sla, forecast, proposals, reason)
@@ -202,8 +237,29 @@ async def decide(task_id: str, correlation_id: str) -> None:
         payload=decision_payload,
     )
     await runtime.redis.set(f"decision:made:{task_id}", "dispatch", ex=3600)
+    if should_scale_for_sla(sla):
+        scale_explanation = build_explanation("scale", task, selected, sla, forecast, proposals, "high_sla_risk_advisory_scale")
+        await publish_scale(
+            task,
+            correlation_id,
+            "high_sla_risk_advisory_scale",
+            scale_explanation,
+            utility_value=selected_utility,
+            advisory=True,
+            requeue_after_scale=False,
+        )
     DECISION_LATENCY_SECONDS.observe(time.time() - started)
-    logger.info("Dispatch decision emitted", extra={"cloudrm_task_id": task_id, "cloudrm_node_id": selected["node_id"]})
+    logger.info(
+        "Dispatch decision emitted",
+        extra={
+            "cloudrm_task_id": task_id,
+            "cloudrm_selected_node": selected["node_id"],
+            "cloudrm_utility": selected_utility,
+            "cloudrm_decision_type": "dispatch",
+            "cloudrm_reason": reason,
+            "cloudrm_sla_risk": sla_risk_value(sla),
+        },
+    )
 
 
 async def schedule_decision(task_id: str, correlation_id: str) -> None:

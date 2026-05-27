@@ -27,7 +27,7 @@ def test_rabbit_settings_from_config() -> None:
 def test_rabbit_default_topology_contains_required_bindings() -> None:
     settings = RabbitMQSettings()
 
-    assert settings.queues["queue.requests"] == ["request.created", "sla.boost", "sla.risk"]
+    assert settings.queues["queue.requests"] == ["request.created", "sla.boost", "sla.risk", "scaling.done"]
     assert settings.queues["queue.resources"] == ["need_placement", "node.metrics.*", "node.unavailable"]
     assert "node.proposal.*" in settings.queues["queue.coordinator"]
     assert settings.queues["queue.executor"] == ["decision.dispatch", "node.unavailable"]

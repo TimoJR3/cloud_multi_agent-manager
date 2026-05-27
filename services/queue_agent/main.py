@@ -20,7 +20,7 @@ from cloudrm.runtime import ServiceRuntime
 configure_logging()
 logger = logging.getLogger("queue-agent")
 
-runtime = ServiceRuntime("queue-agent", ["request.created", "sla.risk", "sla.boost"])
+runtime = ServiceRuntime("queue-agent", ["request.created", "sla.risk", "sla.boost", "scaling.done"])
 worker_task: asyncio.Task[None] | None = None
 aging_task: asyncio.Task[None] | None = None
 
@@ -140,6 +140,33 @@ async def apply_sla_signal(payload: dict[str, Any], correlation_id: str) -> None
     )
 
 
+async def handle_scaling_done(payload: dict[str, Any], correlation_id: str) -> None:
+    assert runtime.redis is not None
+    if not payload.get("requeue_after_scale"):
+        return
+    task_id = payload.get("task_id")
+    if not task_id:
+        return
+    task = await runtime.redis.hgetall(f"task:{task_id}")
+    if task.get("status") in {"running", "done", "dispatched"}:
+        return
+    task_class = task.get("class", payload.get("class", classify(payload)))
+    score = float(task.get("priority", payload.get("dynamic_priority", payload.get("priority", 1))))
+    await runtime.redis.zadd("queue:waiting", {task_id: score})
+    await runtime.redis.zadd(queue_key(task_class), {task_id: score})
+    await set_queue_metrics()
+    await runtime.publish(
+        "need_placement",
+        EventEnvelope(
+            event_type="need_placement",
+            correlation_id=correlation_id,
+            source="queue-agent",
+            payload={**payload, **task, "task_id": task_id, "class": task_class, "dynamic_priority": int(min(10, score))},
+        ),
+    )
+    logger.info("Task requeued after scaling", extra={"cloudrm_task_id": task_id, "cloudrm_node_id": payload.get("node_id")})
+
+
 async def aging_loop() -> None:
     assert runtime.redis is not None
     interval = float(get_nested(runtime.config, "agents", "queue", "aging_interval_seconds", default=1.0))
@@ -175,6 +202,8 @@ async def worker() -> None:
                 logger.info("Task classified", extra={"cloudrm_task_id": envelope.payload["task_id"], "cloudrm_class": classify(envelope.payload)})
             elif envelope.event_type in {"sla.boost", "sla.risk"}:
                 await apply_sla_signal(envelope.payload, envelope.correlation_id)
+            elif envelope.event_type == "scaling.done":
+                await handle_scaling_done(envelope.payload, envelope.correlation_id)
             await runtime.consumer.commit()
             runtime.last_error = None
         except Exception as exc:  # noqa: BLE001

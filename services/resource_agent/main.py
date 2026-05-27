@@ -109,7 +109,7 @@ async def worker() -> None:
                         event_type="node.proposal.fit",
                         correlation_id=envelope.correlation_id,
                         source="resource-agent",
-                        payload={**task, **proposal},
+                        payload={**task, **proposal, "unsafe": False, "resource_unsafe": False},
                     ),
                 )
             if proposals == 0:

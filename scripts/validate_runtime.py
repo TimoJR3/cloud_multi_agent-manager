@@ -20,6 +20,7 @@ SERVICES = {
     "coordinator-agent": "http://localhost:8015",
     "executor-agent": "http://localhost:8016",
     "load-generator": "http://localhost:8017",
+    "scale-agent": "http://localhost:8018",
 }
 
 COMPOSE_SERVICES = [
@@ -34,6 +35,7 @@ COMPOSE_SERVICES = [
     "forecast-agent",
     "coordinator-agent",
     "executor-agent",
+    "scale-agent",
     "load-generator",
     "prometheus",
     "grafana",
@@ -59,7 +61,7 @@ def check_compose_config() -> bool:
         return False
     output = (result.stdout + result.stderr).strip()
     if result.returncode == 0:
-        print("[✓] Docker Compose конфигурация валидна")
+        print("[OK] Docker Compose конфигурация валидна")
         return True
     print("[!] Docker Compose конфигурация невалидна")
     if output:
@@ -94,7 +96,7 @@ def check_compose_services_running() -> bool:
     running = {line.strip() for line in result.stdout.splitlines() if line.strip()}
     missing = [service for service in COMPOSE_SERVICES if service not in running]
     if not missing:
-        print("[✓] Все основные Docker Compose сервисы запущены")
+        print("[OK] Все основные Docker Compose сервисы запущены")
         return True
     print("[!] Не все Docker Compose сервисы запущены")
     print(f"Не запущены: {', '.join(missing)}")
@@ -127,7 +129,7 @@ def check_http(name: str, url: str) -> bool:
         status, payload = http_json("GET", url)
         service_status = payload.get("status", "unknown")
         ok = 200 <= status < 300 and service_status == "ok"
-        print(f"[{'✓' if ok else '!'}] {name}: HTTP {status}, статус={service_status}")
+        print(f"[{'OK' if ok else '!'}] {name}: HTTP {status}, статус={service_status}")
         if not ok:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         return ok
@@ -140,7 +142,7 @@ def check_plain_http(name: str, url: str) -> bool:
     try:
         status, _ = http_request("GET", url)
         ok = 200 <= status < 300
-        print(f"[{'✓' if ok else '!'}] {name}: HTTP {status}")
+        print(f"[{'OK' if ok else '!'}] {name}: HTTP {status}")
         return ok
     except Exception as exc:  # noqa: BLE001
         print(f"[!] {name}: недоступен: {exc}")
@@ -150,7 +152,7 @@ def check_plain_http(name: str, url: str) -> bool:
 def check_tcp_port(name: str, host: str, port: int) -> bool:
     try:
         with socket.create_connection((host, port), timeout=5):
-            print(f"[✓] {name}: TCP {host}:{port} доступен")
+            print(f"[OK] {name}: TCP {host}:{port} доступен")
             return True
     except Exception as exc:  # noqa: BLE001
         print(f"[!] {name}: TCP {host}:{port} недоступен: {exc}")
@@ -162,7 +164,7 @@ def check_command(name: str, command: list[str], expected: str | None = None) ->
         result = run_command(command)
         output = (result.stdout + result.stderr).strip()
         ok = result.returncode == 0 and (expected is None or expected in output)
-        print(f"[{'✓' if ok else '!'}] {name}: код={result.returncode}")
+        print(f"[{'OK' if ok else '!'}] {name}: код={result.returncode}")
         if not ok:
             print(output[-1000:])
         return ok
@@ -186,17 +188,22 @@ def check_event_flow() -> bool:
             print(f"[!] Поток событий: API вернул HTTP {status}")
             return False
         task_id = created["task_id"]
-        print(f"[✓] Поток событий: задача принята API, task_id={task_id}")
+        print(f"[OK] Поток событий: задача принята API, task_id={task_id}")
         for _ in range(60):
             _, current = http_json("GET", f"http://localhost:8000/tasks/{task_id}")
             if current["status"] == "done":
-                print("[✓] Поток событий: задача дошла до execution.done")
+                print("[OK] Поток событий: задача дошла до execution.done")
                 return True
             if current["status"] == "failed":
                 print(f"[!] Поток событий: задача завершилась ошибкой: {current.get('error')}")
                 return False
             time.sleep(1)
-        print("[!] Поток событий: задача не завершилась за 60 секунд")
+        _, current = http_json("GET", f"http://localhost:8000/tasks/{task_id}")
+        print(
+            f"[!] Поток событий: задача не завершилась за 60 секунд, "
+            f"last_status={current.get('status')}, error={current.get('error')}"
+        )
+        print("[!] Проверьте логи: docker compose logs --tail=200 coordinator-agent resource-agent executor-agent")
         return False
     except urllib.error.HTTPError as exc:
         print(f"[!] Поток событий: HTTP ошибка {exc.code}: {exc.read().decode('utf-8')}")
@@ -233,7 +240,7 @@ def main() -> int:
     checks.append(check_plain_http("Prometheus", "http://localhost:9090/-/healthy"))
     checks.append(check_plain_http("Grafana", "http://localhost:3000/api/health"))
     if all(checks):
-        print("[✓] Итог: все обязательные runtime-проверки прошли")
+        print("[OK] Итог: все обязательные runtime-проверки прошли")
         return 0
     print("[!] Итог: часть runtime-проверок не прошла")
     return 1
