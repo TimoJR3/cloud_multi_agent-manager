@@ -1,6 +1,12 @@
 # CloudRM: мультиагентное управление очередями и ресурсами облачного ЦОД
 
-Исследовательский прототип для ВКР «Разработка мультиагентной системы для управления очередями и ресурсами в облачных ЦОД». Система моделирует событийный контур: API принимает заявки, queue-agent классифицирует их и ведет очереди, resource-agent формирует предложения размещения, SLA-agent оценивает риск и фактические нарушения, forecast-agent дает краткосрочный прогноз, coordinator-agent принимает объяснимое решение, executor-agent эмулирует исполнение, scale-agent эмулирует scale-out/scale-in.
+[![CI](https://github.com/TimoJR3/cloud_multi_agent-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/TimoJR3/cloud_multi_agent-manager/actions/workflows/ci.yml)
+
+Прототип к выпускной квалификационной работе (ВКР) «Разработка мультиагентной системы для управления очередями и ресурсами в облачных ЦОД». Система моделирует событийный контур: API принимает заявки, queue-agent классифицирует их и ведет очереди, resource-agent формирует предложения размещения, SLA-agent оценивает риск и фактические нарушения, forecast-agent дает краткосрочный прогноз, coordinator-agent принимает объяснимое решение, executor-agent эмулирует исполнение, scale-agent эмулирует scale-out/scale-in.
+
+Стек: Python 3.11, FastAPI, RabbitMQ (aio-pika), Kafka (aiokafka), PostgreSQL, Redis, Prometheus, Grafana, Docker Compose.
+
+**Контракт событий:** [docs/asyncapi.yaml](docs/asyncapi.yaml) — спецификация AsyncAPI 3.0: 16 типов событий, очереди агентов, повторная доставка через `mas.retry` и DLQ `queue.dead`. Тест `tests/test_asyncapi_contract.py` сверяет её с топологией RabbitMQ и подписками сервисов. Открыть визуально: [AsyncAPI Studio](https://studio.asyncapi.com/) → *Import* файла.
 
 RabbitMQ теперь является основным runtime broker для агентного контура. Kafka сохранена как опциональная audit/telemetry шина через `EVENT_BACKEND=kafka|dual`.
 
@@ -22,10 +28,10 @@ python scripts/validate_runtime.py
 RUN_INTEGRATION=1 pytest -q tests/integration
 ```
 
-Локальные unit/smoke тесты:
+Локальные unit/smoke тесты (их же запускает CI):
 
 ```bash
-py -3.11 -m pytest -q
+py -3.11 -m pytest -q --ignore=tests/integration
 ```
 
 ## Конфигурация Брокера
@@ -42,6 +48,10 @@ RabbitMQ topology:
 - retry exchange: `mas.retry`
 - DLX: `mas.dlx`
 - queues: `queue.requests`, `queue.resources`, `queue.sla`, `queue.forecast`, `queue.coordinator`, `queue.executor`, `queue.scale`, `queue.dead`, `queue.retry`
+- повтор: необработанное сообщение уходит в `mas.retry` → `queue.retry` (TTL 10 с) → обратно в `mas.events`; после 3 попыток — в `mas.dlx` → `queue.dead`
+- в Kafka повторной доставки и DLQ нет
+
+Подробно — в [AsyncAPI-спецификации](docs/asyncapi.yaml).
 
 ## Сервисы
 

@@ -1,0 +1,1462 @@
+asyncapi: 3.0.0
+info:
+  title: CloudRM — события мультиагентного контура
+  version: 1.0.0
+  description: |
+    Контракт событий между агентами CloudRM. Описано то, что реализовано в коде:
+    `common/cloudrm/messages.py` (конверт), `rabbit.py` (топология RabbitMQ, повторная доставка, DLQ),
+    `kafka.py` (Kafka), `runtime.py` (выбор брокера), `services/*/main.py` (кто что публикует и слушает).
+
+    **Брокер** выбирается переменной `EVENT_BACKEND`:
+    - `rabbitmq` (по умолчанию) — публикация и потребление через RabbitMQ;
+    - `kafka` — публикация и потребление через Kafka;
+    - `dual` — публикация в оба брокера, потребление только из RabbitMQ.
+
+    **Адресация.** Каждый канал — один тип события. Адрес канала одновременно является
+    routing key в exchange `mas.events` (RabbitMQ публикует с `routing_key = event_type`)
+    и именем топика Kafka (`config/services.yaml → kafka.topics`, имена совпадают с `event_type`).
+
+    **Повторная доставка (только RabbitMQ).** Если обработчик не подтвердил сообщение
+    (`consumer.commit()` не вызван из-за исключения), `RabbitConsumer.retry_or_dead_letter`
+    увеличивает заголовок `x-retry-count` и публикует копию в exchange `mas.retry` с тем же routing key.
+    Очередь `queue.retry` держит её `retry_ttl_ms` (10 000 мс) и по истечении TTL возвращает
+    в `mas.events` (`x-dead-letter-exchange: mas.events`). После `x-max-retries` попыток
+    (по умолчанию 3) сообщение отклоняется без повторной постановки и попадает в DLQ.
+    Возврат идёт в exchange, а не в исходную очередь, поэтому копию снова получат все очереди,
+    привязанные к этому routing key.
+
+    **DLQ (только RabbitMQ).** Все рабочие очереди объявлены с `x-dead-letter-exchange: mas.dlx`.
+    В `queue.dead` (привязка `#` к `mas.dlx`) попадают сообщения, которые: исчерпали попытки;
+    просрочены по `expires_at` конверта (отклоняются консьюмером); истекли по per-message TTL брокера
+    (`expiration = ttl_seconds × 1000`, по умолчанию 300 с).
+
+    **Kafka.** Автокоммит выключен, консьюмер коммитит offset после обработки; просроченные
+    события коммитятся и пропускаются. Повторной доставки и DLQ для Kafka в коде нет.
+  tags:
+    - name: requests
+      description: Приём и классификация заявок
+    - name: placement
+      description: Подбор узла
+    - name: sla
+      description: Риск нарушения SLA
+    - name: forecast
+      description: Прогноз очереди
+    - name: decisions
+      description: Решения координатора
+    - name: execution
+      description: Исполнение и отказы узлов
+    - name: scaling
+      description: Масштабирование
+    - name: reliability
+      description: Повторная доставка и DLQ
+
+defaultContentType: application/json
+
+servers:
+  rabbitmq:
+    host: 'rabbitmq:5672'
+    protocol: amqp
+    protocolVersion: 0.9.1
+    description: |
+      Основной брокер (`EVENT_BACKEND=rabbitmq|dual`). Параметры подключения — `RABBITMQ_*` в `.env`,
+      значения по умолчанию — `RabbitMQSettings` в `common/cloudrm/rabbit.py`. Prefetch — 10.
+  kafka:
+    host: '{bootstrapServers}'
+    protocol: kafka
+    description: Опциональный брокер (`EVENT_BACKEND=kafka|dual`). Адрес — `KAFKA_BOOTSTRAP_SERVERS`.
+    variables:
+      bootstrapServers:
+        default: 'kafka:9092'
+        description: Значение `KAFKA_BOOTSTRAP_SERVERS`.
+
+channels:
+  # ---------- Событийные каналы: routing key в mas.events = топик Kafka ----------
+  requestCreated:
+    address: request.created
+    title: request.created
+    messages:
+      requestCreated:
+        $ref: '#/components/messages/RequestCreated'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  requestClassified:
+    address: request.classified
+    title: request.classified
+    messages:
+      requestClassified:
+        $ref: '#/components/messages/RequestClassified'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  needPlacement:
+    address: need_placement
+    title: need_placement
+    messages:
+      needPlacement:
+        $ref: '#/components/messages/NeedPlacement'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  nodeProposalFit:
+    address: node.proposal.fit
+    title: node.proposal.fit
+    messages:
+      nodeProposalFit:
+        $ref: '#/components/messages/NodeProposalFit'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  slaRisk:
+    address: sla.risk
+    title: sla.risk
+    messages:
+      slaRisk:
+        $ref: '#/components/messages/SlaRisk'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  slaBoost:
+    address: sla.boost
+    title: sla.boost
+    messages:
+      slaBoost:
+        $ref: '#/components/messages/SlaBoost'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  forecastQueue:
+    address: forecast.queue
+    title: forecast.queue
+    messages:
+      forecastQueue:
+        $ref: '#/components/messages/ForecastQueue'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  decisionDispatch:
+    address: decision.dispatch
+    title: decision.dispatch
+    messages:
+      decisionDispatch:
+        $ref: '#/components/messages/DecisionDispatch'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  decisionScale:
+    address: decision.scale
+    title: decision.scale
+    messages:
+      decisionScale:
+        $ref: '#/components/messages/DecisionScale'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  executionDone:
+    address: execution.done
+    title: execution.done
+    messages:
+      executionDone:
+        $ref: '#/components/messages/ExecutionDone'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  executionFailed:
+    address: execution.failed
+    title: execution.failed
+    messages:
+      executionFailed:
+        $ref: '#/components/messages/ExecutionFailed'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  nodeUnavailable:
+    address: node.unavailable
+    title: node.unavailable
+    messages:
+      nodeUnavailable:
+        $ref: '#/components/messages/NodeUnavailable'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  scalingStarted:
+    address: scaling.started
+    title: scaling.started
+    messages:
+      scalingStarted:
+        $ref: '#/components/messages/ScalingStarted'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  scalingDone:
+    address: scaling.done
+    title: scaling.done
+    messages:
+      scalingDone:
+        $ref: '#/components/messages/ScalingDone'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  scalingBlocked:
+    address: scaling.blocked
+    title: scaling.blocked
+    messages:
+      scalingBlocked:
+        $ref: '#/components/messages/ScalingBlocked'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+  scalingFailed:
+    address: scaling.failed
+    title: scaling.failed
+    messages:
+      scalingFailed:
+        $ref: '#/components/messages/ScalingFailed'
+    bindings:
+      $ref: '#/components/channelBindings/eventsExchange'
+
+  # ---------- Очереди агентов RabbitMQ (EVENT_BACKEND=rabbitmq|dual) ----------
+  queueRequests:
+    address: queue.requests
+    title: queue.requests (queue-agent)
+    description: 'Привязки к mas.events: `request.created`, `sla.boost`, `sla.risk`, `scaling.done`.'
+    servers:
+      - $ref: '#/servers/rabbitmq'
+    messages:
+      requestCreated:
+        $ref: '#/components/messages/RequestCreated'
+      slaBoost:
+        $ref: '#/components/messages/SlaBoost'
+      slaRisk:
+        $ref: '#/components/messages/SlaRisk'
+      scalingDone:
+        $ref: '#/components/messages/ScalingDone'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.requests
+          durable: true
+          exclusive: false
+          autoDelete: false
+  queueResources:
+    address: queue.resources
+    title: queue.resources (resource-agent)
+    description: |
+      Привязки: `need_placement`, `node.metrics.*`, `node.unavailable`.
+      Событий `node.metrics.*` в коде никто не публикует — привязка зарезервирована.
+    servers:
+      - $ref: '#/servers/rabbitmq'
+    messages:
+      needPlacement:
+        $ref: '#/components/messages/NeedPlacement'
+      nodeUnavailable:
+        $ref: '#/components/messages/NodeUnavailable'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.resources
+          durable: true
+          exclusive: false
+          autoDelete: false
+  queueSla:
+    address: queue.sla
+    title: queue.sla (sla-agent)
+    description: |
+      Привязки: `request.classified`, `decision.*`, `execution.*`.
+      События `decision.*` sla-agent получает, но не обрабатывает (подтверждает без действий).
+    servers:
+      - $ref: '#/servers/rabbitmq'
+    messages:
+      requestClassified:
+        $ref: '#/components/messages/RequestClassified'
+      decisionDispatch:
+        $ref: '#/components/messages/DecisionDispatch'
+      decisionScale:
+        $ref: '#/components/messages/DecisionScale'
+      executionDone:
+        $ref: '#/components/messages/ExecutionDone'
+      executionFailed:
+        $ref: '#/components/messages/ExecutionFailed'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.sla
+          durable: true
+          exclusive: false
+          autoDelete: false
+  queueForecast:
+    address: queue.forecast
+    title: queue.forecast (forecast-agent)
+    description: |
+      Привязки: `request.*`, `queue.*`, `execution.*`. Событий `queue.*` в коде никто не публикует.
+      Прогноз пересчитывается на каждое полученное событие, окно частоты поступления пополняет только `request.classified`.
+    servers:
+      - $ref: '#/servers/rabbitmq'
+    messages:
+      requestCreated:
+        $ref: '#/components/messages/RequestCreated'
+      requestClassified:
+        $ref: '#/components/messages/RequestClassified'
+      executionDone:
+        $ref: '#/components/messages/ExecutionDone'
+      executionFailed:
+        $ref: '#/components/messages/ExecutionFailed'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.forecast
+          durable: true
+          exclusive: false
+          autoDelete: false
+  queueCoordinator:
+    address: queue.coordinator
+    title: queue.coordinator (coordinator-agent)
+    description: 'Привязки: `request.classified`, `node.proposal.*`, `sla.*`, `forecast.*`, `node.unavailable`.'
+    servers:
+      - $ref: '#/servers/rabbitmq'
+    messages:
+      requestClassified:
+        $ref: '#/components/messages/RequestClassified'
+      nodeProposalFit:
+        $ref: '#/components/messages/NodeProposalFit'
+      slaRisk:
+        $ref: '#/components/messages/SlaRisk'
+      slaBoost:
+        $ref: '#/components/messages/SlaBoost'
+      forecastQueue:
+        $ref: '#/components/messages/ForecastQueue'
+      nodeUnavailable:
+        $ref: '#/components/messages/NodeUnavailable'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.coordinator
+          durable: true
+          exclusive: false
+          autoDelete: false
+  queueExecutor:
+    address: queue.executor
+    title: queue.executor (executor-agent)
+    description: 'Привязки: `decision.dispatch`, `node.unavailable`.'
+    servers:
+      - $ref: '#/servers/rabbitmq'
+    messages:
+      decisionDispatch:
+        $ref: '#/components/messages/DecisionDispatch'
+      nodeUnavailable:
+        $ref: '#/components/messages/NodeUnavailable'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.executor
+          durable: true
+          exclusive: false
+          autoDelete: false
+  queueScale:
+    address: queue.scale
+    title: queue.scale (scale-agent)
+    description: 'Привязка: `decision.scale`.'
+    servers:
+      - $ref: '#/servers/rabbitmq'
+    messages:
+      decisionScale:
+        $ref: '#/components/messages/DecisionScale'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.scale
+          durable: true
+          exclusive: false
+          autoDelete: false
+
+  # ---------- Повторная доставка и DLQ (RabbitMQ) ----------
+  retryExchange:
+    address: '{routingKey}'
+    title: mas.retry → queue.retry
+    description: |
+      Копия необработанного сообщения с тем же телом, `message_id`, `correlation_id` и заголовками,
+      плюс `x-retry-count + 1`. Очередь `queue.retry` (привязка `#`) объявлена с
+      `x-message-ttl: 10000` и `x-dead-letter-exchange: mas.events`: через 10 с сообщение
+      возвращается в `mas.events` с исходным routing key.
+    servers:
+      - $ref: '#/servers/rabbitmq'
+    parameters:
+      routingKey:
+        description: Исходный routing key (`event_type`) сообщения.
+    messages:
+      retriedEvent:
+        $ref: '#/components/messages/RetriedEvent'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: mas.retry
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+  deadLetterQueue:
+    address: queue.dead
+    title: mas.dlx → queue.dead (DLQ)
+    description: |
+      Очередь мёртвых писем, привязана к exchange `mas.dlx` по ключу `#`. Сообщения попадают сюда,
+      когда консьюмер делает `reject(requeue=False)` (исчерпаны попытки — метрика
+      `DEAD_LETTER_MESSAGES{reason="max_retries"}`; просрочен конверт — `reason="expired"`)
+      или когда истёк per-message TTL брокера. Автоматической обработки `queue.dead` в коде нет.
+    servers:
+      - $ref: '#/servers/rabbitmq'
+    messages:
+      deadLetter:
+        $ref: '#/components/messages/DeadLetter'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: queue.dead
+          durable: true
+          exclusive: false
+          autoDelete: false
+
+operations:
+  # ---------- Публикация (send). Брокер зависит от EVENT_BACKEND ----------
+  apiPublishRequestCreated:
+    action: send
+    title: api-service публикует request.created
+    summary: 'POST /tasks: задача сохранена в БД со статусом created, событие отправлено в контур.'
+    channel:
+      $ref: '#/channels/requestCreated'
+    tags:
+      - name: requests
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  apiPublishNodeUnavailable:
+    action: send
+    title: api-service публикует node.unavailable
+    summary: 'POST /nodes/{node_id}/failure: имитация отказа узла.'
+    channel:
+      $ref: '#/channels/nodeUnavailable'
+    tags:
+      - name: execution
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  queueAgentPublishClassified:
+    action: send
+    title: queue-agent публикует request.classified
+    channel:
+      $ref: '#/channels/requestClassified'
+    tags:
+      - name: requests
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  queueAgentPublishNeedPlacement:
+    action: send
+    title: queue-agent публикует need_placement
+    summary: После классификации, после SLA-сигнала (sla.risk / sla.boost) и после scaling.done с requeue_after_scale.
+    channel:
+      $ref: '#/channels/needPlacement'
+    tags:
+      - name: placement
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  resourceAgentPublishProposal:
+    action: send
+    title: resource-agent публикует node.proposal.fit
+    summary: По одному событию на каждый подходящий узел; если подходящих нет — одно событие с node_id = null и unsafe = true.
+    channel:
+      $ref: '#/channels/nodeProposalFit'
+    tags:
+      - name: placement
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  slaAgentPublishRisk:
+    action: send
+    title: sla-agent публикует sla.risk
+    summary: На каждое request.classified.
+    channel:
+      $ref: '#/channels/slaRisk'
+    tags:
+      - name: sla
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  slaAgentPublishBoost:
+    action: send
+    title: sla-agent публикует sla.boost
+    summary: Только при severity medium, high или critical.
+    channel:
+      $ref: '#/channels/slaBoost'
+    tags:
+      - name: sla
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  forecastAgentPublish:
+    action: send
+    title: forecast-agent публикует forecast.queue
+    channel:
+      $ref: '#/channels/forecastQueue'
+    tags:
+      - name: forecast
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  coordinatorPublishDispatch:
+    action: send
+    title: coordinator-agent публикует decision.dispatch
+    channel:
+      $ref: '#/channels/decisionDispatch'
+    tags:
+      - name: decisions
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  coordinatorPublishScale:
+    action: send
+    title: coordinator-agent публикует decision.scale
+    summary: Нет безопасных узлов (requeue_after_scale = true) или высокий риск SLA при dispatch (advisory = true).
+    channel:
+      $ref: '#/channels/decisionScale'
+    tags:
+      - name: decisions
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  executorPublishDone:
+    action: send
+    title: executor-agent публикует execution.done
+    channel:
+      $ref: '#/channels/executionDone'
+    tags:
+      - name: execution
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  executorPublishFailed:
+    action: send
+    title: executor-agent публикует execution.failed
+    summary: Ошибка исполнения задачи или отказ узла (по одному событию на каждую задачу, запущенную на узле).
+    channel:
+      $ref: '#/channels/executionFailed'
+    tags:
+      - name: execution
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  scaleAgentPublishStarted:
+    action: send
+    title: scale-agent публикует scaling.started
+    channel:
+      $ref: '#/channels/scalingStarted'
+    tags:
+      - name: scaling
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  scaleAgentPublishDone:
+    action: send
+    title: scale-agent публикует scaling.done
+    channel:
+      $ref: '#/channels/scalingDone'
+    tags:
+      - name: scaling
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  scaleAgentPublishBlocked:
+    action: send
+    title: scale-agent публикует scaling.blocked
+    channel:
+      $ref: '#/channels/scalingBlocked'
+    tags:
+      - name: scaling
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+  scaleAgentPublishFailed:
+    action: send
+    title: scale-agent публикует scaling.failed
+    channel:
+      $ref: '#/channels/scalingFailed'
+    tags:
+      - name: scaling
+    bindings:
+      $ref: '#/components/operationBindings/amqpPublish'
+
+  # ---------- Потребление из RabbitMQ (EVENT_BACKEND=rabbitmq|dual) ----------
+  queueAgentConsume:
+    action: receive
+    title: queue-agent читает queue.requests
+    channel:
+      $ref: '#/channels/queueRequests'
+    tags:
+      - name: requests
+    bindings:
+      $ref: '#/components/operationBindings/amqpConsume'
+  resourceAgentConsume:
+    action: receive
+    title: resource-agent читает queue.resources
+    channel:
+      $ref: '#/channels/queueResources'
+    tags:
+      - name: placement
+    bindings:
+      $ref: '#/components/operationBindings/amqpConsume'
+  slaAgentConsume:
+    action: receive
+    title: sla-agent читает queue.sla
+    channel:
+      $ref: '#/channels/queueSla'
+    tags:
+      - name: sla
+    bindings:
+      $ref: '#/components/operationBindings/amqpConsume'
+  forecastAgentConsume:
+    action: receive
+    title: forecast-agent читает queue.forecast
+    channel:
+      $ref: '#/channels/queueForecast'
+    tags:
+      - name: forecast
+    bindings:
+      $ref: '#/components/operationBindings/amqpConsume'
+  coordinatorConsume:
+    action: receive
+    title: coordinator-agent читает queue.coordinator
+    channel:
+      $ref: '#/channels/queueCoordinator'
+    tags:
+      - name: decisions
+    bindings:
+      $ref: '#/components/operationBindings/amqpConsume'
+  executorConsume:
+    action: receive
+    title: executor-agent читает queue.executor
+    channel:
+      $ref: '#/channels/queueExecutor'
+    tags:
+      - name: execution
+    bindings:
+      $ref: '#/components/operationBindings/amqpConsume'
+  scaleAgentConsume:
+    action: receive
+    title: scale-agent читает queue.scale
+    channel:
+      $ref: '#/channels/queueScale'
+    tags:
+      - name: scaling
+    bindings:
+      $ref: '#/components/operationBindings/amqpConsume'
+
+  # ---------- Повторная доставка и DLQ ----------
+  consumerRetry:
+    action: send
+    title: Консьюмер RabbitMQ отправляет сообщение на повтор
+    summary: Сообщение не подтверждено обработчиком и x-retry-count < x-max-retries (по умолчанию 3).
+    channel:
+      $ref: '#/channels/retryExchange'
+    tags:
+      - name: reliability
+    bindings:
+      amqp:
+        deliveryMode: 2
+        bindingVersion: 0.3.0
+  consumerDeadLetter:
+    action: send
+    title: Консьюмер RabbitMQ отклоняет сообщение в DLQ
+    summary: reject(requeue=False) → mas.dlx → queue.dead.
+    channel:
+      $ref: '#/channels/deadLetterQueue'
+    tags:
+      - name: reliability
+
+  # ---------- Потребление из Kafka (только EVENT_BACKEND=kafka) ----------
+  # group_id = имя сервиса, enable_auto_commit = false, auto_offset_reset = earliest.
+  queueAgentConsumeKafka:
+    action: receive
+    title: 'queue-agent (Kafka): request.created'
+    description: 'Подписка queue-agent в Kafka: request.created, sla.risk, sla.boost, scaling.done.'
+    channel:
+      $ref: '#/channels/requestCreated'
+    bindings:
+      $ref: '#/components/operationBindings/kafkaQueueAgent'
+  resourceAgentConsumeKafka:
+    action: receive
+    title: 'resource-agent (Kafka): need_placement'
+    description: 'Подписка resource-agent в Kafka: need_placement, node.unavailable.'
+    channel:
+      $ref: '#/channels/needPlacement'
+    bindings:
+      $ref: '#/components/operationBindings/kafkaResourceAgent'
+  slaAgentConsumeKafka:
+    action: receive
+    title: 'sla-agent (Kafka): request.classified'
+    description: 'Подписка sla-agent в Kafka: request.classified, execution.done, execution.failed.'
+    channel:
+      $ref: '#/channels/requestClassified'
+    bindings:
+      $ref: '#/components/operationBindings/kafkaSlaAgent'
+  forecastAgentConsumeKafka:
+    action: receive
+    title: 'forecast-agent (Kafka): request.classified'
+    description: 'Подписка forecast-agent в Kafka: request.classified, execution.done, execution.failed.'
+    channel:
+      $ref: '#/channels/requestClassified'
+    bindings:
+      $ref: '#/components/operationBindings/kafkaForecastAgent'
+  coordinatorConsumeKafka:
+    action: receive
+    title: 'coordinator-agent (Kafka): request.classified'
+    description: |
+      Подписка coordinator-agent в Kafka: request.classified, node.proposal.fit, sla.risk, forecast.queue.
+      В отличие от RabbitMQ, node.unavailable и sla.boost в Kafka-подписку не входят.
+    channel:
+      $ref: '#/channels/requestClassified'
+    bindings:
+      $ref: '#/components/operationBindings/kafkaCoordinator'
+  executorConsumeKafka:
+    action: receive
+    title: 'executor-agent (Kafka): decision.dispatch'
+    description: 'Подписка executor-agent в Kafka: decision.dispatch, node.unavailable.'
+    channel:
+      $ref: '#/channels/decisionDispatch'
+    bindings:
+      $ref: '#/components/operationBindings/kafkaExecutor'
+  scaleAgentConsumeKafka:
+    action: receive
+    title: 'scale-agent (Kafka): decision.scale'
+    channel:
+      $ref: '#/channels/decisionScale'
+    bindings:
+      $ref: '#/components/operationBindings/kafkaScaleAgent'
+
+components:
+  channelBindings:
+    eventsExchange:
+      amqp:
+        is: routingKey
+        exchange:
+          name: mas.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+
+  operationBindings:
+    amqpPublish:
+      amqp:
+        deliveryMode: 2
+        expiration: 300000
+        bindingVersion: 0.3.0
+    amqpConsume:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+    kafkaQueueAgent:
+      kafka:
+        groupId:
+          type: string
+          const: queue-agent
+        bindingVersion: 0.5.0
+    kafkaResourceAgent:
+      kafka:
+        groupId:
+          type: string
+          const: resource-agent
+        bindingVersion: 0.5.0
+    kafkaSlaAgent:
+      kafka:
+        groupId:
+          type: string
+          const: sla-agent
+        bindingVersion: 0.5.0
+    kafkaForecastAgent:
+      kafka:
+        groupId:
+          type: string
+          const: forecast-agent
+        bindingVersion: 0.5.0
+    kafkaCoordinator:
+      kafka:
+        groupId:
+          type: string
+          const: coordinator-agent
+        bindingVersion: 0.5.0
+    kafkaExecutor:
+      kafka:
+        groupId:
+          type: string
+          const: executor-agent
+        bindingVersion: 0.5.0
+    kafkaScaleAgent:
+      kafka:
+        groupId:
+          type: string
+          const: scale-agent
+        bindingVersion: 0.5.0
+
+  messageTraits:
+    envelope:
+      contentType: application/json
+      correlationId:
+        description: 'Сквозной идентификатор заявки: AMQP-свойство correlation_id и ключ сообщения Kafka.'
+        location: $message.payload#/correlation_id
+      headers:
+        type: object
+        description: Заголовки AMQP. В Kafka заголовки не передаются.
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          schema_version:
+            type: string
+            const: '1'
+          source:
+            type: string
+          x-retry-count:
+            type: integer
+            minimum: 1
+            description: Появляется после первой повторной доставки.
+          x-max-retries:
+            type: integer
+            description: Читается консьюмером, по умолчанию 3. Издатели в коде его не выставляют.
+      bindings:
+        amqp:
+          contentEncoding: utf-8
+          messageType: event
+          bindingVersion: 0.3.0
+        kafka:
+          key:
+            type: string
+            description: correlation_id конверта.
+          bindingVersion: 0.5.0
+
+  messages:
+    RequestCreated:
+      name: request.created
+      title: Заявка принята
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: request.created
+              source:
+                const: api-service
+              payload:
+                $ref: '#/components/schemas/Task'
+    RequestClassified:
+      name: request.classified
+      title: Заявка классифицирована
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: request.classified
+              source:
+                const: queue-agent
+              payload:
+                $ref: '#/components/schemas/ClassifiedTask'
+    NeedPlacement:
+      name: need_placement
+      title: Нужно размещение
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: need_placement
+              source:
+                const: queue-agent
+              payload:
+                $ref: '#/components/schemas/ClassifiedTask'
+    NodeProposalFit:
+      name: node.proposal.fit
+      title: Предложение узла
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: node.proposal.fit
+              source:
+                const: resource-agent
+              payload:
+                $ref: '#/components/schemas/NodeProposal'
+    SlaRisk:
+      name: sla.risk
+      title: Оценка риска SLA
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: sla.risk
+              source:
+                const: sla-agent
+              payload:
+                $ref: '#/components/schemas/SlaAssessment'
+    SlaBoost:
+      name: sla.boost
+      title: Повышение приоритета по SLA
+      summary: Тот же payload, что у sla.risk; публикуется при severity medium/high/critical.
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: sla.boost
+              source:
+                const: sla-agent
+              payload:
+                $ref: '#/components/schemas/SlaAssessment'
+    ForecastQueue:
+      name: forecast.queue
+      title: Прогноз очереди
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: forecast.queue
+              source:
+                const: forecast-agent
+              payload:
+                $ref: '#/components/schemas/Forecast'
+    DecisionDispatch:
+      name: decision.dispatch
+      title: Решение — отправить на узел
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: decision.dispatch
+              source:
+                const: coordinator-agent
+              payload:
+                $ref: '#/components/schemas/DispatchDecision'
+    DecisionScale:
+      name: decision.scale
+      title: Решение — масштабировать
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: decision.scale
+              source:
+                const: coordinator-agent
+              payload:
+                $ref: '#/components/schemas/ScaleDecision'
+    ExecutionDone:
+      name: execution.done
+      title: Задача выполнена
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: execution.done
+              source:
+                const: executor-agent
+              payload:
+                allOf:
+                  - $ref: '#/components/schemas/DispatchDecision'
+                  - $ref: '#/components/schemas/ExecutionTiming'
+                  - type: object
+                    properties:
+                      status:
+                        const: done
+    ExecutionFailed:
+      name: execution.failed
+      title: Задача не выполнена
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: execution.failed
+              source:
+                const: executor-agent
+              payload:
+                $ref: '#/components/schemas/ExecutionFailure'
+    NodeUnavailable:
+      name: node.unavailable
+      title: Узел недоступен
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: node.unavailable
+              source:
+                const: api-service
+              payload:
+                type: object
+                required: [node_id, reason, status]
+                properties:
+                  node_id:
+                    type: string
+                  reason:
+                    type: string
+                    const: manual_failure
+                  status:
+                    type: string
+                    const: failed
+    ScalingStarted:
+      name: scaling.started
+      title: Масштабирование начато
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: scaling.started
+              source:
+                const: scale-agent
+              payload:
+                $ref: '#/components/schemas/ScalingEvent'
+    ScalingDone:
+      name: scaling.done
+      title: Масштабирование завершено
+      summary: node_id — добавленный (scale-out) или удалённый (scale-in) узел.
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: scaling.done
+              source:
+                const: scale-agent
+              payload:
+                allOf:
+                  - $ref: '#/components/schemas/ScalingEvent'
+                  - type: object
+                    required: [node_id]
+    ScalingBlocked:
+      name: scaling.blocked
+      title: Масштабирование заблокировано
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: scaling.blocked
+              source:
+                const: scale-agent
+              payload:
+                allOf:
+                  - $ref: '#/components/schemas/ScalingEvent'
+                  - type: object
+                    required: [reason]
+                    properties:
+                      reason:
+                        type: string
+                        enum: [cooldown, no_safe_auto_nodes]
+                        description: cooldown — не прошло agents.scale.cooldown_seconds (30 с) с прошлого действия; no_safe_auto_nodes — нет пустых авто-узлов для scale-in.
+    ScalingFailed:
+      name: scaling.failed
+      title: Ошибка масштабирования
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              event_type:
+                const: scaling.failed
+              source:
+                const: scale-agent
+              payload:
+                allOf:
+                  - $ref: '#/components/schemas/ScaleDecision'
+                  - type: object
+                    required: [error]
+                    properties:
+                      error:
+                        type: string
+    RetriedEvent:
+      name: retried-event
+      title: Повторная доставка
+      summary: Тело и свойства исходного сообщения без изменений; в заголовках увеличен x-retry-count.
+      traits:
+        - $ref: '#/components/messageTraits/envelope'
+      payload:
+        $ref: '#/components/schemas/Envelope'
+    DeadLetter:
+      name: dead-letter
+      title: Сообщение в DLQ
+      summary: |
+        Исходное сообщение. RabbitMQ добавляет заголовок x-death (очередь, причина rejected или expired, число попыток).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/Envelope'
+
+  schemas:
+    Envelope:
+      type: object
+      description: EventEnvelope (common/cloudrm/messages.py), сериализуется broker_payload().
+      required:
+        - event_type
+        - schema_version
+        - correlation_id
+        - event_id
+        - source
+        - occurred_at
+        - payload
+        - message_id
+      properties:
+        event_type:
+          type: string
+          description: Тип события; совпадает с routing key и топиком.
+        schema_version:
+          type: string
+          default: '1'
+        correlation_id:
+          type: string
+          description: Сквозной ID заявки, по умолчанию UUID4.
+        event_id:
+          type: string
+          format: uuid
+        source:
+          type: string
+          enum:
+            - api-service
+            - queue-agent
+            - resource-agent
+            - sla-agent
+            - forecast-agent
+            - coordinator-agent
+            - executor-agent
+            - scale-agent
+        occurred_at:
+          type: string
+          format: date-time
+        ttl_seconds:
+          type: [integer, 'null']
+          exclusiveMinimum: 0
+          description: Издатели в коде не задают; брокерный TTL RabbitMQ при этом = default_ttl_seconds (300).
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+          description: occurred_at + ttl_seconds. Просроченное событие консьюмер не обрабатывает.
+        message_id:
+          type: string
+          format: uuid
+          description: Новый UUID на каждую публикацию (в RabbitMQ также AMQP-свойство message_id).
+        payload:
+          type: object
+
+    Task:
+      type: object
+      description: TaskCreate + поля, добавленные api-service.
+      required: [task_id, task_type, cpu_required, ram_required_mb, duration_seconds, priority, sla_deadline_seconds, requires_gpu, created_at, created_at_ts]
+      additionalProperties: true
+      properties:
+        task_id:
+          type: string
+        task_type:
+          type: string
+          default: generic
+        cpu_required:
+          type: number
+          exclusiveMinimum: 0
+          default: 1.0
+        ram_required_mb:
+          type: integer
+          exclusiveMinimum: 0
+          default: 512
+        duration_seconds:
+          type: number
+          exclusiveMinimum: 0
+          default: 5.0
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 10
+          default: 1
+        sla_deadline_seconds:
+          type: integer
+          exclusiveMinimum: 0
+          default: 30
+        requires_gpu:
+          type: boolean
+          default: false
+        payload:
+          type: object
+          description: Пользовательские данные задачи.
+        created_at:
+          type: string
+          format: date-time
+        created_at_ts:
+          type: number
+          description: Unix-время создания.
+
+    ClassifiedTask:
+      description: Task + результат классификации queue-agent.
+      allOf:
+        - $ref: '#/components/schemas/Task'
+        - type: object
+          required: [class, dynamic_priority]
+          properties:
+            class:
+              type: string
+              enum: [standard, cpu-heavy, memory-heavy, gpu, critical]
+            dynamic_priority:
+              type: integer
+              minimum: 0
+              maximum: 10
+              description: Приоритет с учётом aging и SLA boost, ограничен 10.
+            queue_length:
+              type: integer
+              description: Размер queue:waiting; есть только при первичной классификации.
+
+    NodeProposal:
+      description: ClassifiedTask + оценка узла resource-agent.
+      allOf:
+        - $ref: '#/components/schemas/ClassifiedTask'
+        - type: object
+          required: [node_id, fit_score, unsafe, resource_unsafe]
+          properties:
+            node_id:
+              type: [string, 'null']
+              description: null, если подходящих узлов нет.
+            fit_score:
+              type: number
+              description: 0.7 × fit + 0.3 × balance; 0.0, если узлов нет.
+            balance_score:
+              type: number
+            cost:
+              type: number
+            cpu_utilization_after:
+              type: number
+            ram_utilization_after:
+              type: number
+            unsafe:
+              type: boolean
+            resource_unsafe:
+              type: boolean
+            reason:
+              type: string
+              const: no suitable nodes
+
+    SlaAssessment:
+      description: ClassifiedTask + оценка риска sla-agent (assess_risk).
+      allOf:
+        - $ref: '#/components/schemas/ClassifiedTask'
+        - type: object
+          required: [estimated_wait, deadline, risk, severity, recommendation, unsafe, sla_risk, sla_severity, boosted_priority]
+          properties:
+            estimated_wait:
+              type: number
+            deadline:
+              type: number
+            risk:
+              type: number
+              minimum: 0
+              maximum: 1
+              description: min(1, (estimated_wait + duration_seconds) / sla_deadline_seconds).
+            severity:
+              $ref: '#/components/schemas/Severity'
+            recommendation:
+              type: string
+              enum: [observe, boost, scale]
+              description: scale — critical; boost — medium или high; observe — low.
+            unsafe:
+              type: boolean
+              description: true при severity = critical.
+            sla_risk:
+              type: number
+              description: Копия risk.
+            sla_severity:
+              $ref: '#/components/schemas/Severity'
+            boosted_priority:
+              type: integer
+              maximum: 10
+              description: dynamic_priority + 2 (high, critical), + 1 (medium), + 0 (low).
+
+    Severity:
+      type: string
+      enum: [low, medium, high, critical]
+      description: 'Пороги risk: medium ≥ 0.5, high ≥ 0.8, critical ≥ 0.95.'
+
+    Forecast:
+      type: object
+      description: Payload входящего события + прогноз forecast-agent.
+      additionalProperties: true
+      required: [predicted_queue, overload_risk, arrival_rate]
+      properties:
+        predicted_queue:
+          type: integer
+          description: queue_length + arrival_rate × 5.
+        overload_risk:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: min(1, predicted_queue / 20).
+        arrival_rate:
+          type: number
+          description: Заявок в секунду по окну request.classified.
+
+    DecisionExplanation:
+      type: object
+      required: [reason, used_signals, utility_breakdown, decision_type]
+      properties:
+        reason:
+          type: string
+          enum:
+            - best_utility
+            - high_sla_risk_dispatch_with_advisory_scale
+            - degraded_policy_no_agent_proposals
+            - no_safe_nodes_available
+            - high_sla_risk_advisory_scale
+        used_signals:
+          type: object
+          properties:
+            task:
+              type: boolean
+            proposals:
+              type: integer
+            sla:
+              type: boolean
+            forecast:
+              type: boolean
+            degraded:
+              type: boolean
+        utility_breakdown:
+          type: object
+          description: Взвешенные компоненты utility (веса — agents.coordinator.weights); пусто для scale без выбранного узла.
+          properties:
+            fit:
+              type: number
+            sla:
+              type: number
+            balance:
+              type: number
+            forecast:
+              type: number
+            cost:
+              type: number
+        decision_type:
+          type: string
+          enum: [dispatch, scale]
+
+    DispatchDecision:
+      description: ClassifiedTask + выбранное предложение узла + utility и объяснение.
+      allOf:
+        - $ref: '#/components/schemas/ClassifiedTask'
+        - $ref: '#/components/schemas/DecisionExplanation'
+        - type: object
+          required: [node_id, utility]
+          properties:
+            node_id:
+              type: string
+            fit_score:
+              type: number
+            utility:
+              type: number
+            degraded:
+              type: boolean
+              description: true, если предложений агентов не было и узел выбран деградированной политикой.
+
+    ScaleDecision:
+      description: ClassifiedTask + объяснение + параметры масштабирования.
+      allOf:
+        - $ref: '#/components/schemas/ClassifiedTask'
+        - $ref: '#/components/schemas/DecisionExplanation'
+        - type: object
+          required: [recommended_nodes, advisory, requeue_after_scale]
+          properties:
+            recommended_nodes:
+              type: integer
+              const: 1
+            advisory:
+              type: boolean
+              description: true — рекомендация при dispatch с высоким риском SLA.
+            requeue_after_scale:
+              type: boolean
+              description: true — безопасных узлов нет; после scaling.done queue-agent снова публикует need_placement.
+            action:
+              type: string
+              enum: [scale-out, scale-in]
+              description: Координатор поле не задаёт, scale-agent по умолчанию выполняет scale-out.
+
+    ScalingEvent:
+      description: Payload decision.scale + действие scale-agent.
+      allOf:
+        - $ref: '#/components/schemas/ScaleDecision'
+        - type: object
+          required: [action]
+          properties:
+            action:
+              type: string
+              enum: [scale-out, scale-in]
+            node_id:
+              type: string
+              description: Для scale-out — новый узел node-auto-N.
+
+    ExecutionTiming:
+      type: object
+      required: [started_at, finished_at]
+      properties:
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+
+    ExecutionFailure:
+      description: |
+        Две формы. Ошибка исполнения: payload decision.dispatch + status, reason, started_at, finished_at.
+        Отказ узла (по node.unavailable): только task_id, node_id, status, reason для каждой задачи на узле.
+      type: object
+      additionalProperties: true
+      required: [task_id, status, reason]
+      properties:
+        task_id:
+          type: string
+        node_id:
+          type: string
+        status:
+          type: string
+          const: failed
+        reason:
+          type: string
+          description: node_failure или текст исключения.
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
