@@ -1,6 +1,50 @@
 # CloudRM: мультиагентное управление очередями и ресурсами облачного ЦОД
 
 [![CI](https://github.com/TimoJR3/cloud_multi_agent-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/TimoJR3/cloud_multi_agent-manager/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.11-3776AB)
+![AsyncAPI](https://img.shields.io/badge/AsyncAPI-3.0-6F42C1)
+![RabbitMQ](https://img.shields.io/badge/RabbitMQ-основной_брокер-FF6600)
+![Kafka](https://img.shields.io/badge/Kafka-audit-231F20)
+
+Событийная система из 7 агентов: они принимают заявки на вычисления, распределяют
+их по узлам облачного ЦОД, следят за SLA и масштабируют ресурсы. Главный артефакт
+для системного анализа — **контракт событий в AsyncAPI 3.0**, который автотест сверяет
+с реальной топологией брокера.
+
+**Роль:** системный аналитик и разработчик прототипа (ВКР) · **Стек:** Python, FastAPI,
+RabbitMQ, Kafka, PostgreSQL, Redis, Prometheus, Grafana, Docker Compose, pytest
+
+## Главное
+
+| | |
+|---|---|
+| **Контракт событий** | [AsyncAPI 3.0](docs/asyncapi.yaml): 16 типов событий, 7 очередей агентов, продюсеры и консьюмеры каждого события |
+| **Отказоустойчивость** | повторная доставка через `mas.retry` (TTL 10 с, до 3 попыток), затем очередь недоставленных сообщений `queue.dead` |
+| **Контракт = код** | тест `tests/test_asyncapi_contract.py` сверяет спецификацию с топологией RabbitMQ и подписками сервисов — расхождение ломает CI |
+| **Эксперименты** | сценарии `normal`, `overload`, `gpu_shortage`, `node_failure` в режимах `baseline` и `mas` |
+| **Наблюдаемость** | 10 метрик Prometheus: ожидание в очереди, задержка решения, нарушения SLA, DLQ, масштабирование |
+
+## Как устроено
+
+```mermaid
+flowchart LR
+    API[api-service] -- request.created --> Q[queue-agent]
+    Q -- need_placement --> R[resource-agent]
+    Q -- request.classified --> C[coordinator-agent]
+    R -- node.proposal.fit --> C
+    S[sla-agent] -- "sla.risk / sla.boost" --> C
+    F[forecast-agent] -- forecast.queue --> C
+    C -- decision.dispatch --> E[executor-agent]
+    C -- decision.scale --> SC[scale-agent]
+    E -. "execution.done / failed" .-> S
+    SC -. scaling.done .-> Q
+```
+
+Все события идут через exchange `mas.events` в RabbitMQ. Полный список привязок
+очередей — в [AsyncAPI-спецификации](docs/asyncapi.yaml).
+
+## О проекте
+
 
 Прототип к выпускной квалификационной работе (ВКР) «Разработка мультиагентной системы для управления очередями и ресурсами в облачных ЦОД». Система моделирует событийный контур: API принимает заявки, queue-agent классифицирует их и ведет очереди, resource-agent формирует предложения размещения, SLA-agent оценивает риск и фактические нарушения, forecast-agent дает краткосрочный прогноз, coordinator-agent принимает объяснимое решение, executor-agent эмулирует исполнение, scale-agent эмулирует scale-out/scale-in.
 
@@ -10,7 +54,7 @@
 
 RabbitMQ теперь является основным runtime broker для агентного контура. Kafka сохранена как опциональная audit/telemetry шина через `EVENT_BACKEND=kafka|dual`.
 
-## Быстрый Запуск
+## Быстрый запуск
 
 ```bash
 make init
@@ -34,7 +78,7 @@ RUN_INTEGRATION=1 pytest -q tests/integration
 py -3.11 -m pytest -q --ignore=tests/integration
 ```
 
-## Конфигурация Брокера
+## Конфигурация брокера
 
 `EVENT_BACKEND` задает режим событий:
 
@@ -69,7 +113,7 @@ RabbitMQ topology:
 | `prometheus` | 9090 | метрики |
 | `grafana` | 3000 | dashboard |
 
-## Основные Сценарии
+## Основные сценарии
 
 Создать задачу:
 
